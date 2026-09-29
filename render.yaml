@@ -15,5 +15,7 @@ services:
         sync: false
       - key: APP_ENV
         value: production
+      - key: PYTHON_VERSION
+        value: 3.11.11
       - key: TDS_COMPLIANCE_DEV_AUTH
         value: "false"
