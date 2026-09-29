@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: 26as-reconciliation-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: MONGO_URL
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: APP_ENV
+        value: production
+      - key: TDS_COMPLIANCE_DEV_AUTH
+        value: "false"
