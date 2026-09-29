@@ -1,0 +1,22 @@
+{
+  "url": "http://127.0.0.1:3001/tds-compliance",
+  "text": "26\nAS\nTDS Compliance\nCA Compliance Workspace\nTDS COMPLIANCE\nCompliance Overview\nAssignments\nCURRENT ASSIGNMENT\nPlan\nPayment Ledger\nTDS Calculation\nDeposit & Challans\nInterest & Delay\nReturn Audit\nReview Queue\nReports\nADMINISTRATION\nAdministration\nStatutory Rules\nSettings\nHelp\nCU\nCA UAT Reviewer\nChartered Accountant\nWorkspace\nTDS Compliance\nSelect Client\nCU\nTDS COMPLIANCE\nCompliance workspace\n\nReview the selected deductor assignment, evidence readiness, calculation progress, and controlled review items.\n\nACTIVE ASSIGNMENT\nTDS TEST CLIENT · FY 2025-26 · TAN pending\nASSESSEE / COMPANY\nTDS TEST CLIENT\nPAN\nNot provided\nTAN\nNot provided\nFINANCIAL YEAR / QUARTER\n2025-26 · All quarters\nWORKFLOW STAGE\nClassification\nLOCK STATE\nEDITABLE\nCURRENT COMPLIANCE POSITION\nReview items need attention\n\nStage: Classification · Last updated: 9/16/2026, 6:26:12 PM\n\nREVIEW REQUIRED\nLEDGER TRANSACTIONS\n118\nCurrent committed ledger version\nCLASSIFIED\n0\nPayment-nature decisions available\nCALCULATED\n118\nPersisted calculation-result rows\nEXCEPTIONS\n119\nControlled review items\nDEPOSIT ISSUES\n0\nLatest deposit-compliance run\nINTEREST ISSUES\n0\nLatest interest-compliance run\nOpen assignment workflow\nOpen TDS calculator\nReview deposit evidence\nLock assignment\nCOMPLIANCE JOURNEY\nWorkflow progress\n\nEach stage is derived from persisted TDS Compliance records.\n\n1\nAssignment\nAssignment created\nCOMPLETED\n2\nData collection\nPayment ledger committed\nCOMPLETED\n3\nClassification\n0 of 118 ledger rows classified\nBLOCKED\n4\nTDS review\nCalculation run available\nBLOCKED\n5\nDeposit\nAwaiting deposit evidence and review\nNOT STARTED\n6\nInterest Compliance\nAwaiting a persisted deposit-compliance run\nNOT STARTED\n7\nGovernment Evidence\nGovernment Tax Credit Summary not committed\nNOT STARTED\n8\nGovernment Evidence Verification\nAwaiting committed government summary evidence and a verification run\nNOT STARTED\n9\nReturn compliance\nNo return-evidence workflow is persisted yet\nNOT STARTED\n10\nCA review\nCA review remains open\nIN PROGRESS\n11\nApproval\nLock is the available final assignment action\nNOT STARTED\n12\nLock\nAssignment remains editable\nNOT STARTED\nREQUIRED DATA\nSource readiness\n\nOnly committed source versions are treated as available evidence.\n\nPayment Ledger\n2041000_92B Salaries.xlsx\nCommitted\nv17 · 118 rows · 0 validation issues\nDeductee / Vendor Master\nNo committed deductee-master source is stored\nNot provided\nUpload and commit required\nDeposit / Challan Evidence\nNo source record available\nNot provided\nUpload and commit required\nGovernment Tax Credit Summary\nNo government summary source is stored\nNot provided\nUpload and commit required\nReturn-related Evidence\nNo return-evidence source is stored\nNot provided\nUpload and commit required\nEXCEPTION SUMMARY\nItems that need CA attention\n\nCounts are drawn from the latest persisted workflow records; unavailable downstream workflows are explicit.\n\nCLASSIFICATION REVIEW\n118\nOpen the assignment workflow to review records\nRULE NOT FOUND\n0\nNo issue in the latest available run\nINSUFFICIENT DATA\n0\nNo issue in the latest available run\nTDS DIFFERENCE\n0\nNo issue in the latest available run\nDEPOSIT ISSUE\n0\nNo issue in the latest available run\nINTEREST ISSUE\n0\nNo issue in the latest available run\nRECONCILIATION ISSUE\nNot available\nWorkflow not implemented or no persisted source\nRETURN ISSUE\nNot available\nWorkflow not implemented or no persisted source\nMISSING EVIDENCE\n1\nOpen the assignment workflow to review records\nGovernment reconciliation and return evidence have no persisted TDS Compliance workflow yet. They remain not started; no counts have been invented.",
+  "events": {
+    "console": [
+      "Failed to load resource: net::ERR_NETWORK_ACCESS_DENIED",
+      "Failed to load resource: net::ERR_NETWORK_ACCESS_DENIED"
+    ],
+    "pageErrors": [],
+    "failedRequests": [
+      {
+        "url": "https://fonts.googleapis.com/css2?family=Inter:wght@600&display=swap",
+        "failure": "net::ERR_NETWORK_ACCESS_DENIED"
+      },
+      {
+        "url": "https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap",
+        "failure": "net::ERR_NETWORK_ACCESS_DENIED"
+      }
+    ],
+    "badResponses": []
+  }
+}

@@ -1,0 +1,66 @@
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import DashboardPage from '../DashboardPage';
+import ReconciliationPage from '../ReconciliationPage';
+import SalesTds26asPage from '../SalesTds26asPage';
+import { AIAssistant } from '../../components/AIAssistant';
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+const mockWorkspace = { runId: 'R1' as string | null, run: { run_id: 'R1', workflow: 'FULL_RECONCILIATION', status: 'COMPLETED', assessee_name: 'Existing Client', financial_year: '2026-27' }, runs: [], clientId: 'CA', runLoading: false, runError: false, refreshRun: jest.fn(), processing: false, watchJob: jest.fn() };
+const mockQuery = jest.fn();
+jest.mock('../../context/WorkspaceContext', () => ({ useWorkspace: () => mockWorkspace }));
+jest.mock('react-router-dom', () => ({ useNavigate: () => jest.fn(), useParams: () => ({}), useSearchParams: () => [new URLSearchParams(), jest.fn()] }), { virtual: true });
+jest.mock('@tanstack/react-query', () => ({ useQuery: (...args: unknown[]) => mockQuery(...args), useMutation: () => ({ mutate: jest.fn(), isPending: false }) }));
+jest.mock('../../services/api', () => ({ api: { loadSample: jest.fn() }, getErrorMessage: () => 'Unavailable' }));
+jest.mock('sonner', () => ({ toast: { info: jest.fn(), error: jest.fn() } }));
+let host: HTMLDivElement, root: Root;
+beforeEach(() => { mockWorkspace.run.workflow = 'FULL_RECONCILIATION'; mockWorkspace.runId = 'R1'; mockQuery.mockReset(); mockQuery.mockReturnValue({ data: { items: [], total: 0, facets: {} }, isLoading: false, isError: false }); host = document.createElement('div'); document.body.appendChild(host); root = createRoot(host); });
+afterEach(() => { act(() => root.unmount()); host.remove(); });
+test('existing full reconciliation workbench still renders', async () => { await act(async () => { root.render(<ReconciliationPage />); }); expect(host.textContent).toContain('Reconciliation'); expect(host.textContent).toContain('Existing Client'); expect(host.textContent).not.toContain('Deposit compliance'); });
+test('existing 26AS-only workbench preserves analysis presentation', async () => { mockWorkspace.run.workflow = '26AS_ONLY'; await act(async () => { root.render(<ReconciliationPage />); }); expect(host.textContent).toContain('26AS'); expect(host.textContent).toContain('Not Determinable'); expect(host.textContent).not.toContain('Run Compliance'); });
+test('existing sales TDS 26AS workbench still renders', async () => { mockWorkspace.run.workflow = 'SALES_TDS_26AS'; await act(async () => { root.render(<SalesTds26asPage />); }); expect(host.textContent).toContain('Sales + TDS + 26AS'); expect(host.textContent).not.toContain('Run Compliance'); });
+test('Sales relationship card shows one canonical identity badge and the 26AS deductor', async () => {
+  mockWorkspace.run.workflow = 'SALES_TDS_26AS';
+  const row = { id: 'kims', run_id: 'R1', seq: 1, workflow: 'SALES_TDS_26AS', transaction_id: '26AS-KIMS', financial_year: '2025-26', quarter: 'Q1', section: '194J', identity: { customer_name: 'Krishna Medical Centre', customer_pan: null, customer_gstin: null, deductor_name: 'KRISHNA INSTITUTE OF MEDICAL SCIENCES LIMITED SECUNDERABAD', tan: 'HYDK01946A', status: 'REVIEW_REQUIRED', method: 'PARTIAL_NORMALIZED_SALES_NAME', confidence: 75, reason: 'CA review required' }, sales_check: { status: 'REVIEW_REQUIRED', identity_status: 'REVIEW_REQUIRED', identity_method: 'PARTIAL_NORMALIZED_SALES_NAME', identity_confidence: 75, identity_evidence: [], customer_name: 'Krishna Medical Centre', customer_gstin: null, invoice_count: 0, source_record_ids: [], invoice_value_total: null, taxable_value_total: 375000, tax_components: {}, amount_basis: 'taxable_value', amount: 375000, difference: -3786956, amount_status: 'REVIEW_REQUIRED' }, amount_check: { sales_amount: 375000, statement_amount_paid: 4161956, difference: -3786956, status: 'REVIEW_REQUIRED' }, tds_check: { ledger_amount: 29241, statement_amount: 29241, tds_expected: 29241, statement_tds_deducted: 29241, difference: 0, status: 'TDS_MATCHED', reconciliation_status: 'MATCHED', statement_entry_count: 6 }, overall_status: 'IDENTITY_REVIEW_REQUIRED', reason: 'CA review required', recommended_action: 'Review', severity: 'MEDIUM' };
+  mockQuery.mockImplementation((options: { queryKey?: string[] }) => ({ data: options.queryKey?.[0] === 'sales-tds-results' ? { items: [row], total: 1 } : { summary: {} }, isLoading: false, isError: false }));
+  await act(async () => { root.render(<SalesTds26asPage />); });
+  const card = host.querySelector('[data-testid="sales-workbench-row-kims"]') as HTMLElement;
+  expect(card.textContent).toContain('Deductor: KRISHNA INSTITUTE OF MEDICAL SCIENCES LIMITED SECUNDERABAD');
+  expect(card.textContent).toContain('HYDK01946A');
+  expect(card.textContent).toContain('IdentityReview Required');
+  expect(card.querySelectorAll('.relationship-identity .badge')).toHaveLength(1);
+  expect(card.textContent).toContain('TDS reconciliation');
+  expect(card.textContent).toContain('Matched');
+});
+test('Sales detail opens safely for a historical row without optional Sales evidence', async () => {
+  mockWorkspace.run.workflow = 'SALES_TDS_26AS';
+  const legacy = { id: 'legacy-row', run_id: 'R1', seq: 1, workflow: 'SALES_TDS_26AS', transaction_id: '26AS-1', financial_year: '2025-26', quarter: 'Q1', section: '194C', identity: { customer_name: null, customer_pan: null, customer_gstin: null, deductor_name: 'Example Deductor', tan: 'ABCD12345E', status: 'CONFIRMED', method: '26AS_SOURCE_TAN_NAME_FY', reason: 'Source supplied' }, identity_bridge: { statement: { deductor_name: 'Example Deductor', tan: 'ABCD12345E' }, ledger_candidates: [{ ledger_group_id: 'ledger-1', ledger_name: 'Example ledger', ledger_tds_amount: 100 }], sales_candidates: [{ customer_name: 'Example customer', sales_row_count: 1, taxable_value: 1000 }], alias_evidence: [], identity_decision: { selected_ledger_groups: ['ledger-1'], method: '26AS_SOURCE_TAN_NAME_FY', reason: 'Source supplied' } }, amount_check: { sales_amount: null, statement_amount_paid: 1000, difference: null, status: 'AMOUNT_NOT_DETERMINABLE' }, tds_check: { tds_expected: null, statement_tds_deducted: 100, difference: null, status: 'MISSING_IN_TDS' }, overall_status: 'UNMAPPED', reason: 'Historical result', recommended_action: 'Review', severity: 'MEDIUM' };
+  mockQuery.mockImplementation((options: { queryKey?: string[] }) => ({ data: options.queryKey?.[0] === 'sales-tds-results' ? { items: [legacy], total: 1 } : { summary: {} }, isLoading: false, isError: false }));
+  await act(async () => { root.render(<SalesTds26asPage />); });
+  await act(async () => { host.querySelector<HTMLElement>('[data-testid="sales-workbench-row-legacy-row"]')?.click(); });
+  expect(host.textContent).toContain('SALES RECONCILIATION');
+  expect(host.textContent).toContain('Identity source26AS');
+  expect(host.textContent).toContain('View identity evidence');
+  expect(host.textContent).not.toContain('26AS, Sales and ledger evidence');
+  await act(async () => { Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'View identity evidence')?.click(); });
+  expect(host.textContent).toContain('26AS, Sales and ledger evidence');
+  expect(host.textContent).toContain('Example ledger');
+  expect(host.textContent).not.toContain('26AS Source Tan Name Fy');
+});
+test('dashboard remains limited to the 26AS reconciliation workspace', async () => { await act(async () => { root.render(<DashboardPage />); }); expect(host.textContent).toContain('Dashboard'); expect(host.textContent).toContain('Existing Client'); expect(host.textContent).toContain('New Reconciliation'); expect(host.textContent).not.toContain('TDS Compliance'); });
+test('dashboard explains Sales, TDS and identity outcomes without secondary control totals', async () => {
+  mockWorkspace.run.workflow = 'SALES_TDS_26AS';
+  mockQuery.mockReturnValue({ data: { workflow_mode: 'SALES_TDS_26AS', summary: { result_count: 7, deductor_count: 7, sales_count: 12, amount_matched_count: 1, amount_difference_count: 2, tds_matched_count: 2, tds_difference_count: 0, identity_counts: { REVIEW_REQUIRED: 5 }, tds_status_counts: { MATCHED: 2, REVIEW_REQUIRED: 5, MISSING_TDS_LEDGER_COUNTERPART: 0 }, sales_amount_status_counts: { AMOUNT_MATCHED: 1, AMOUNT_DIFFERENCE: 2 }, control_totals: { sales_source_taxable_total: 143197276.07, '26as_source_amount_total': 72074548.32, sales_source_difference: 71122727.75, primary_sales_taxable_total: 100000, primary_26as_amount_total: 90000, sales_difference_for_primary_population: 10000, sales_only_taxable_total: 143097276.07, '26as_only_amount_total': 71984548.32, tds_amount_evidence_available: 153818.43, total_tds_amount: 153818.43, confirmed_tds_amount: 10257, review_tds_amount: 143561.43, missing_tds_amount: 0 } }, attention: [] }, isLoading: false, isError: false, refetch: jest.fn() });
+  await act(async () => { root.render(<DashboardPage />); });
+  expect(host.textContent).toContain('Sales, TDS Receivable and 26AS');
+  expect(host.textContent).toContain('Relationship confirmation');
+  expect(host.textContent).toContain('2 of 7 relationships confirmed');
+  expect(host.textContent).toContain('TDS amounts are accounted for');
+  expect(host.textContent).toContain('Sales compared on Taxable Value');
+  expect(host.textContent).toContain('Review 5 Relationships');
+  expect(host.textContent).not.toContain('Control Totals');
+  expect(host.textContent).not.toContain('TDS Receivable evidence');
+  expect(host.textContent).not.toContain('Books TDS Expected');
+});
+test('existing AI empty state remains scoped to a selected reconciliation', async () => { await act(async () => { root.render(<AIAssistant run={null} open onClose={() => {}} />); }); expect(host.textContent).toContain('Reconciliation Copilot'); expect(host.textContent).toContain('No reconciliation selected'); });
+

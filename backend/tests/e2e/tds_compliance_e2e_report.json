@@ -1,0 +1,107 @@
+{
+    "report_type":  "TDS Compliance CA UAT - initial discovery",
+    "status":  "BLOCKED",
+    "environment":  {
+                        "frontend":  "http://127.0.0.1:3001",
+                        "backend":  "http://127.0.0.1:8000",
+                        "browser":  "Chrome via Playwright",
+                        "database":  "backend health reports ok"
+                    },
+    "test_data":  {
+                      "synthetic_assignment_created":  false,
+                      "reason":  "UAT blocked before assignment creation"
+                  },
+    "assignment_ids":  [
+
+                       ],
+    "results":  [
+                    {
+                        "id":  "UAT-001",
+                        "step":  "Open real frontend and login",
+                        "expected":  "Workspace opens",
+                        "actual":  "PASS: workspace opened as CA UAT Reviewer",
+                        "status":  "PASS",
+                        "ui_status":  "PASS",
+                        "api_status":  "NOT_EXERCISED",
+                        "database_status":  "NOT_EXERCISED"
+                    },
+                    {
+                        "id":  "UAT-002",
+                        "step":  "Local frontend API connectivity",
+                        "expected":  "Frontend can call local backend",
+                        "actual":  "Browser blocked GET /api/runs due to CORS: http://127.0.0.1:3001 is not allowed",
+                        "status":  "FAIL",
+                        "ui_status":  "FAIL",
+                        "api_status":  "BLOCKED_BY_BROWSER_CORS",
+                        "database_status":  "NOT_EXERCISED"
+                    },
+                    {
+                        "id":  "UAT-003",
+                        "step":  "Configured frontend API connectivity",
+                        "expected":  "Configured API is reachable",
+                        "actual":  "Configured trycloudflare origin could not be reached from UAT browser",
+                        "status":  "FAIL",
+                        "ui_status":  "FAIL",
+                        "api_status":  "UNREACHABLE",
+                        "database_status":  "NOT_EXERCISED"
+                    },
+                    {
+                        "id":  "UAT-004",
+                        "step":  "Backend health",
+                        "expected":  "Local service and database available",
+                        "actual":  "GET /api/health returned 200 with database=ok",
+                        "status":  "PASS",
+                        "ui_status":  "NOT_APPLICABLE",
+                        "api_status":  "PASS",
+                        "database_status":  "PASS"
+                    },
+                    {
+                        "id":  "UAT-005",
+                        "step":  "Retest isolated browser runtime",
+                        "expected":  "Frontend loads TDS workspace and API state",
+                        "actual":  "PASS: overview and assignment workspace loaded from local backend after isolated CORS configuration",
+                        "status":  "PASS",
+                        "ui_status":  "PASS",
+                        "api_status":  "PASS",
+                        "database_status":  "PASS"
+                    }
+                ],
+    "defects":  [
+                    {
+                        "id":  "DEF-001",
+                        "severity":  "BLOCKER",
+                        "title":  "Local UAT frontend is rejected by backend CORS",
+                        "evidence":  "Browser console: No Access-Control-Allow-Origin for http://127.0.0.1:3001 on /api/runs",
+                        "recommended_fix":  "Use an isolated UAT backend process whose CORS_ORIGINS includes the selected local frontend origin."
+                    },
+                    {
+                        "id":  "DEF-002",
+                        "severity":  "BLOCKER",
+                        "title":  "Checked-in frontend UAT API origin is unreachable",
+                        "evidence":  "Browser network: ERR_NETWORK_ACCESS_DENIED for configured trycloudflare endpoint",
+                        "recommended_fix":  "Use a live approved UAT endpoint or an isolated local UAT environment."
+                    },
+                    {
+                        "id":  "DEF-003",
+                        "severity":  "BLOCKER",
+                        "title":  "No isolated E2E assignment and schema-derived fixture pack has been created",
+                        "evidence":  "Browser overview displays pre-existing TDCA-24F1124BAA56 with committed ledger data; it is not the required DEMO TDS SERVICES PRIVATE LIMITED assignment",
+                        "recommended_fix":  "Create the specified isolated UAT fixtures and assignments before exercising the workflow."
+                    }
+                ],
+    "screenshots":  [
+                        "screenshots/00-entry.png",
+                        "screenshots/01-workspace.png",
+                        "screenshots/02-tds-overview.png"
+                    ],
+    "console_errors":  [
+                           "External Google font requests blocked by sandbox",
+                           "CORS failure for local /api/runs"
+                       ],
+    "network_failures":  [
+                             "Configured tunnel unreachable",
+                             "Local backend CORS rejected port 3001"
+                         ],
+    "performance":  "Not run: workflow blocked before fixture upload.",
+    "recommendation":  "CA_UAT_NOT_READY"
+}

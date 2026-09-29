@@ -1,0 +1,9 @@
+.tds-calculator-tool { max-width: 1180px; margin: 0 auto; }
+.calculator-mode { display: flex; gap: 10px; margin: 8px 0 22px; }
+.tds-calculator-form { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; align-items: end; }
+.tds-calculator-form .calculator-actions { grid-column: 1 / -1; justify-content: flex-end; margin-top: 4px; }
+.tds-calculator-results { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 24px; }
+.tds-calculator-results .stat-card { min-height: 128px; }
+.calculator-history { margin-top: 24px; }
+@media (max-width: 860px) { .tds-calculator-form, .tds-calculator-results { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .tds-calculator-form, .tds-calculator-results { grid-template-columns: 1fr; } .calculator-mode { flex-direction: column; } }

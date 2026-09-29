@@ -1,0 +1,25 @@
+import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
+import { ArrowRight, Download } from "lucide-react";
+import { PageHeader, ResultBadge } from "../components/common";
+import { METHOD_LABELS, RESULT_LABELS } from "../lib/format";
+import { api } from "../services/api";
+import type { FileKind } from "../types";
+
+const RESULT_HELP: Record<string, string> = { MATCHED_CLAIMABLE: "Books TDS matched 26AS within tolerance and the 26AS booking status is Final with the full amount deposited — claim the credit.", MATCHED_NOT_CLAIMABLE: "Matched, but the 26AS status is Unmatched/Provisional or the deposit is short — do not claim until the deductor corrects the statement.", AMOUNT_MISMATCH: "A 26AS entry from the mapped Books Customer relationship exists but the amount differs beyond tolerance.", MISSING_IN_BOOKS: "26AS shows a credit from a mapped deductor with no remaining Books transaction to absorb it.", MISSING_IN_26AS: "Books expects TDS but no unconsumed 26AS entry from the mapped TANs matches.", IDENTITY_UNMAPPED: "The deductor TAN could not be authoritatively mapped to a Books Customer — resolve it in Identity Review.", DUPLICATE_BOOK: "Repeated Books entry (same Books Customer, document, date, amount) excluded from matching.", DUPLICATE_26AS: "Repeated 26AS entry (same TAN, date, section, amounts, status) excluded from matching." };
+
+export default function HelpPage() {
+  const navigate = useNavigate();
+  const kinds: FileKind[] = ["books", "form26as", "customer_master"];
+  const schemas = useQuery({ queryKey: ["schemas"], queryFn: () => Promise.all(kinds.map((k) => api.schema(k))) });
+  return <>
+    <PageHeader eyebrow="GUIDE" title="Help & Guide" subtitle="How the 26AS reconciliation engine works and how to read its results." />
+    <div className="help-grid">
+      <section className="workspace-section" data-testid="help-flow"><span className="eyebrow">BUSINESS FLOW</span><h2>From assessee to report</h2><ol className="flow-list">{["Assessee / client and their PAN — whose 26AS is being reconciled", "Client's 26AS: deductor TAN + deductor name per entry", "Identity resolution: Customer Master TAN → saved mappings → aliases → exact name → fuzzy → human review", "Customer / party in books", "Matching engine: exact 1:1 (same, then outside quarter) → group (same, then outside quarter) → mismatch pairing", "Result, reason and recommended action", "CA review in Exceptions and Identity Review", "Reports"].map((s, i) => <li key={i}><b>{i + 1}</b><span>{s}</span></li>)}</ol><p className="muted-copy">A TAN is never converted into a PAN. Identity comes from trusted data, saved decisions and name signals only. One customer may have many TANs.</p></section>
+      <section className="workspace-section" data-testid="help-results"><span className="eyebrow">RESULT TYPES</span><h2>What each outcome means</h2><ul className="help-list">{Object.keys(RESULT_LABELS).map((k) => <li key={k}><ResultBadge result={k} /><span>{RESULT_HELP[k]}</span></li>)}</ul></section>
+      <section className="workspace-section" data-testid="help-methods"><span className="eyebrow">MATCH METHODS</span><h2>How matches are formed</h2><ul className="help-list plain">{Object.entries(METHOD_LABELS).map(([k, v]) => <li key={k}><b>{v}</b><span>{k === "UNMATCHED" ? "No acceptable pairing found." : k.startsWith("EXACT") ? `One books row to one 26AS row within tolerance, ${k.includes("SAME") ? "in the same quarter" : "in a different quarter of the same FY"}. Same section is preferred when several entries qualify.` : `Several rows on one or both sides whose totals agree within tolerance, ${k.includes("SAME") ? "all in one quarter" : "across quarters"}. Multiple TANs of one customer can group together.`}</span></li>)}</ul><p className="muted-copy">Consume-on-match: once an entry is matched it is removed from every later pass, so a 26AS credit can never be claimed twice.</p></section>
+      <section className="workspace-section span-2" data-testid="help-schema"><span className="eyebrow">FILE SCHEMA</span><h2>Accepted columns</h2><p className="muted-copy">Headers are matched flexibly and case-insensitively. Required columns are marked. <button className="text-button" data-testid="help-go-upload" onClick={() => navigate("/reconciliation/new")}>Go to New Reconciliation <ArrowRight size={12} /></button></p>
+        <div className="schema-grid">{schemas.data?.map((s) => <div key={s.kind} className="schema-card"><header><b>{s.label}</b><a className="text-button" href={api.templateUrl(s.kind)} download data-testid={`help-template-${s.kind}`}><Download size={12} /> Template</a></header><table className="mini-table"><thead><tr><th>Column</th><th>Aliases</th></tr></thead><tbody>{s.columns.map((c: any) => <tr key={c.column}><td><b className="mono">{c.column}</b>{c.required && <em className="req">required</em>}<small>{c.description}</small></td><td className="aliases">{c.aliases.slice(0, 5).join(", ")}</td></tr>)}</tbody></table></div>)}</div></section>
+    </div>
+  </>;
+}
