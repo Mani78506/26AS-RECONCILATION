@@ -1,0 +1,51 @@
+{
+  "document_status": "SOURCE_VERIFIED_GOVERNANCE_PENDING_NOT_FOR_PROVISIONING",
+  "purpose": "One-policy source-grounded proposal. It is deliberately not a TDS_E2E_PHASE5_POLICY_FILE because the guarded provisioner requires both interest policy types and complete internal approval metadata.",
+  "policy": {
+    "financial_year": "2026-27",
+    "effective_from": "2026-04-01",
+    "effective_to": "2027-03-31",
+    "governing_act": "INCOME_TAX_ACT_2025",
+    "interest_type": "DEPOSIT_DELAY_INTEREST",
+    "rate": "1.5",
+    "rate_unit": "PERCENT_PER_PERIOD",
+    "period_counting_method": "CALENDAR_MONTH_OR_PART",
+    "interest_period_start": "DATE_OF_DEDUCTION_OR_COLLECTION",
+    "interest_period_end": "DATE_OF_ACTUAL_PAYMENT",
+    "interest_base": null,
+    "rounding_method": null,
+    "rounding_precision": null,
+    "scope": null,
+    "organization_id": null,
+    "client_id": null,
+    "assignment_id": null,
+    "payment_nature": null,
+    "deductee_type": null,
+    "priority": null,
+    "source": "Income Tax Department, Ministry of Finance, Government of India",
+    "source_reference": "Income-tax Act, 2025, section 398(3)(a)(ii); Income-tax Rules, 2026, rule 218",
+    "source_url": "https://www.incometax.gov.in/iec/foportal/help/all-topics/e-filing-services/tax-payments-faq",
+    "source_document_title": "Tax Payments FAQ",
+    "source_provision_reference": "Section 398(3)(a)(ii), supported by Rule 218 timing branches",
+    "source_retrieved_at": "2026-10-06",
+    "source_verified_at": "2026-10-06",
+    "source_verification_evidence": "FAQ 13 states 1.5% per month or part thereof from deduction/collection to actual payment. FAQ 7 states Rule 218 retains the deposit timelines. The notified Income-tax Rules, 2026, rule 218 supplies the branch text.",
+    "approval_metadata": {
+      "approved_source": null,
+      "approval_authority": null,
+      "approval_reference": null
+    },
+    "phase4_due_date_policy_reference": null
+  },
+  "unresolved_before_provisioning": [
+    "interest_base",
+    "rounding_method",
+    "rounding_precision",
+    "deposit_due_date_mode and parameters selected from the applicable Rule 218 branch",
+    "organisation/client/assignment scope",
+    "payment nature and deductee scope",
+    "priority",
+    "internal approval metadata",
+    "the required separate DEDUCTION_DELAY_INTEREST policy"
+  ]
+}

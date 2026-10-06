@@ -1,0 +1,2 @@
+deposit_transaction_id,challan_number,bsr_code,cin,deposit_date,challan_date,amount_deposited,tds_amount,interest_amount,total_amount,tan,section,financial_year,quarter,bank_reference
+E2E-G-DEP-001,00001,0000001,E2ECIN001,2026-04-20,2026-04-20,500,500,0,500,ZZZZ99999Z,393(1),2026-27,Q1,E2E-G-REF-001

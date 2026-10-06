@@ -1,0 +1,86 @@
+{
+  "document_status": "CA_REVIEW_ONLY_NOT_FOR_PROVISIONING",
+  "safety_notice": "This file is not accepted by the E2E provisioner and must never be used as a MongoDB seed. Null fields require a governed decision and recorded evidence.",
+  "source_bundle": {
+    "project_pdf": {
+      "filename": "Scan_20261006_112447.pdf",
+      "sha256": "BEA3EE599418D272514516D9B36FB9621170EA365124C35846766C15ED437D8B",
+      "pages": [
+        14,
+        15
+      ],
+      "paragraphs": [
+        "234.1",
+        "234.2",
+        "234.3"
+      ]
+    },
+    "official_act_url": "https://incometaxindia.gov.in/Documents/Act/Income-tax-Act-2025.pdf",
+    "official_rules_url": "https://www.incometax.gov.in/iec/foportal/sites/default/files/2026-03/En-Notified-IT-Rules-2026-20-03-2026.pdf",
+    "retrieved_on": "2026-10-06"
+  },
+  "policies_for_ca_review": [
+    {
+      "interest_type": "DEDUCTION_DELAY_INTEREST",
+      "financial_year": "2026-27",
+      "effective_from": "2026-04-01",
+      "effective_to": "2027-03-31",
+      "governing_act": "INCOME_TAX_ACT_2025",
+      "rate": "1",
+      "rate_unit": "PERCENT_PER_PERIOD",
+      "interest_period_start": "DATE_TAX_DEDUCTIBLE_OR_COLLECTIBLE",
+      "interest_period_end": "DATE_OF_ACTUAL_DEDUCTION_OR_COLLECTION",
+      "source_provision_reference": "Income-tax Act, 2025, section 398(3)(a)(i); project PDF p.14 Para 234.1",
+      "interest_base": null,
+      "period_counting_method": null,
+      "period_day_block": null,
+      "rounding_method": null,
+      "rounding_precision": null,
+      "payment_nature": null,
+      "deductee_type": null,
+      "scope": null,
+      "organization_id": null,
+      "client_id": null,
+      "assignment_id": null,
+      "priority": null,
+      "approval_metadata": null
+    },
+    {
+      "interest_type": "DEPOSIT_DELAY_INTEREST",
+      "financial_year": "2026-27",
+      "effective_from": "2026-04-01",
+      "effective_to": "2027-03-31",
+      "governing_act": "INCOME_TAX_ACT_2025",
+      "rate": "1.5",
+      "rate_unit": "PERCENT_PER_PERIOD",
+      "interest_period_start": "DATE_OF_ACTUAL_DEDUCTION_OR_COLLECTION",
+      "interest_period_end": "DATE_OF_ACTUAL_PAYMENT",
+      "source_provision_reference": "Income-tax Act, 2025, section 398(3)(a)(ii); project PDF p.14 Para 234.1",
+      "interest_base": null,
+      "period_counting_method": null,
+      "period_day_block": null,
+      "rounding_method": null,
+      "rounding_precision": null,
+      "due_date_policy_reference": null,
+      "payment_nature": null,
+      "deductee_type": null,
+      "scope": null,
+      "organization_id": null,
+      "client_id": null,
+      "assignment_id": null,
+      "priority": null,
+      "approval_metadata": null,
+      "phase4_due_date_policy_reference": null
+    }
+  ],
+  "section_398_2_relief_evidence_branch": {
+    "status": null,
+    "payee_return_furnished_date": null,
+    "income_included_evidence_reference": null,
+    "payee_tax_paid_evidence_reference": null,
+    "form_149_certificate_reference": null,
+    "form_149_submission_reference": null,
+    "relief_decision_snapshot": null,
+    "note": "No relief may be inferred. A verified relief branch still leaves the section 398(3)(a)(i) 1% interest period ending on the return-furnishing date."
+  }
+}

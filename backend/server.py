@@ -9,6 +9,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+from bson.decimal128 import Decimal128
 from dotenv import load_dotenv
 from fastapi import Depends, Request, BackgroundTasks, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
@@ -29,11 +30,12 @@ from engine.shared.sample_data import SAMPLE_ASSESSEE, sample_files
 from engine.shared.schema import FILE_KINDS, FILE_LABELS, PAYMENT_LEDGER, TDS_DEPOSIT_EVIDENCE, SCHEMAS, TEMPLATE_ROWS, schema_description
 from engine.reconciliation.tds_rules import RuleError, validate_rule
 from engine.reconciliation.sales_tds_workflow import _transaction_reconciliation
-from engine.tds_compliance import ASSIGNMENT_STATUSES, DEDUCTEE_MASTER_SCHEMA, PAYMENT_LEDGER_SCHEMA, WORKFLOW as TDS_COMPLIANCE_WORKFLOW, calculate_deposit_compliance, calculate_interest_compliance, calculate_ledger_transactions, calculate_tds_calculator, freeze_calculation_results, validate_deposit_evidence, validate_payment_ledger
+from engine.tds_compliance import ASSIGNMENT_STATUSES, DEDUCTEE_MASTER_SCHEMA, PAYMENT_LEDGER_SCHEMA, PAYER_CATEGORIES, RECIPIENT_CATEGORIES, RECIPIENT_RESIDENCIES, WORKFLOW as TDS_COMPLIANCE_WORKFLOW, calculate_deposit_compliance, calculate_interest_compliance, calculate_interest_from_deposit_results, calculate_ledger_transactions, calculate_tds_calculator, freeze_calculation_results, validate_deposit_evidence, validate_payment_ledger
 from engine.tds_compliance.government_evidence import SOURCE_TYPE as GOVERNMENT_SUMMARY_SOURCE_TYPE, validate_government_tax_credit_summary
 from engine.tds_compliance.government_verification import verify_government_summary
 from engine.tds_compliance.return_audit import ARTIFACT_TYPES as RETURN_AUDIT_ARTIFACT_TYPES, parse_return_artifact, reconcile_return_rows, RETURN_AUDIT_SCHEMA_VERSION
 from engine.tds_compliance.return_reconciliation import reconcile as reconcile_return_evidence, SCHEMA_VERSION as RETURN_RECONCILIATION_SCHEMA_VERSION
+from engine.tds_compliance.source_traceability import governed_activation_errors, source_traceability_errors, source_traceability_snapshot
 from auth_boundary import AuthenticationProviderConfigurationRequired, NonProductionAdapterDisabled, OIDCConfiguration, Principal, authorize, build_development_principal
 from cors_config import CORS_METHODS, allowed_frontend_origins
 
@@ -105,6 +107,37 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("26as")
 app = FastAPI(title="26AS Reconciliation API")
 NO_ID = {"_id": 0}
+
+
+def _tds_mongo_snapshot(value):
+    """Copy TDS evidence into MongoDB-safe exact numeric values.
+
+    TDS engines retain ``Decimal`` during calculation. Persisted snapshots use
+    BSON Decimal128, preserving financial precision without mutating the
+    in-memory API result.
+    """
+    if isinstance(value, Decimal):
+        return Decimal128(value)
+    if isinstance(value, dict):
+        return {key: _tds_mongo_snapshot(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_tds_mongo_snapshot(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_tds_mongo_snapshot(item) for item in value)
+    return value
+
+
+def _tds_api_value(value):
+    """Expose BSON Decimal128 snapshots through the existing Decimal API form."""
+    if isinstance(value, Decimal128):
+        return value.to_decimal()
+    if isinstance(value, dict):
+        return {key: _tds_api_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_tds_api_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_tds_api_value(item) for item in value)
+    return value
 CLIENT_ERROR = "Reconciliation service could not process the request."
 
 
@@ -300,13 +333,13 @@ def return_audit_summary(assignment_id: str, audit_run_id: str | None = None, pr
 def list_return_audit_results(assignment_id: str, audit_run_id: str | None = None, principal: Principal = Depends(_tds_compliance_security_boundary)):
     _return_audit_access(assignment_id, principal); query = {"assignment_id": assignment_id};
     if audit_run_id: query["audit_run_id"] = audit_run_id
-    return {"items": list(db.tds_compliance_return_audit_results.find(query, NO_ID).sort("created_at", DESCENDING))}
+    return _tds_api_value({"items": list(db.tds_compliance_return_audit_results.find(query, NO_ID).sort("created_at", DESCENDING))})
 
 
 @app.get("/api/tds-compliance/assignments/{assignment_id}/return-audit/results/{result_id}")
 def get_return_audit_result(assignment_id: str, result_id: str, principal: Principal = Depends(_tds_compliance_security_boundary)):
     _return_audit_access(assignment_id, principal)
-    return _return_audit_result_or_404(assignment_id, result_id)
+    return _tds_api_value(_return_audit_result_or_404(assignment_id, result_id))
 
 
 @app.get("/api/tds-compliance/assignments/{assignment_id}/return-audit/review-decisions")
@@ -453,6 +486,9 @@ class TdsCalculatorBody(BaseModel):
     deductee_type: str | None = None
     payer_type: str | None = None
     resident_status: str | None = None
+    recipient_residency: str | None = None
+    recipient_category: str | None = None
+    payer_category: str | None = None
     section_input: str | None = None
     previous_aggregate_amount: str | float | int | None = None
     taxable_amount: str | float | int | None = None
@@ -470,6 +506,17 @@ class TdsCalculatorBody(BaseModel):
             raise ValueError("financial_year must use YYYY-YY.")
         if self.payment_mode.upper() not in {"GROSS", "NET_OF_TDS"}:
             raise ValueError("payment_mode must be GROSS or NET_OF_TDS.")
+        if self.recipient_residency is not None:
+            self.recipient_residency = self.recipient_residency.upper()
+            if self.recipient_residency not in RECIPIENT_RESIDENCIES:
+                raise ValueError("recipient_residency must be RESIDENT, NON_RESIDENT, or FOREIGN_COMPANY.")
+        for field, allowed in (("recipient_category", RECIPIENT_CATEGORIES), ("payer_category", PAYER_CATEGORIES)):
+            value = getattr(self, field)
+            if value is not None:
+                value = value.upper()
+                if value not in allowed:
+                    raise ValueError(f"{field} is not a controlled category.")
+                setattr(self, field, value)
         return self
 
 
@@ -491,6 +538,21 @@ class TdsComplianceRuleBody(BaseModel):
     governing_act: str | None = None
     payment_nature: str | None = None
     deductee_type: str | None = None
+    # Generalized source-catalog dimensions.  They are optional for legacy
+    # records and mandatory only for a governed rule that opts into generic
+    # selection; no source transcription becomes executable automatically.
+    recipient_residency: str | None = None
+    recipient_category: str | None = None
+    payer_category: str | None = None
+    nature_of_payment: str | None = None
+    act_2025_section: str | None = None
+    act_2025_table_sl_no: str | None = None
+    corresponding_1961_act_section: str | None = None
+    surcharge_hec: dict | None = None
+    conditions: list[str] | None = None
+    exceptions: list[str] | None = None
+    evidence_requirements: list[str] | None = None
+    generalized_selection_required: StrictBool = False
     section_reference: str | None = None
     historical_section_reference: str | None = None
     table_reference: str | None = None
@@ -508,6 +570,35 @@ class TdsComplianceRuleBody(BaseModel):
     priority: StrictInt = 0
     source: str | None = None
     source_reference: str | None = None
+    source_url: str | None = None
+    source_document_title: str | None = None
+    source_provision_reference: str | None = None
+    source_retrieved_at: str | None = None
+    source_verified_at: str | None = None
+    source_verification_evidence: str | None = None
+    approval_metadata: dict[str, str] | None = None
+    # Interest rules use the same governed document and lifecycle as statutory
+    # rules.  They are deliberately optional in a DRAFT, then required at
+    # submission so a CA can prepare an incomplete draft without the system
+    # supplying legal values.
+    interest_type: str | None = None
+    rate_unit: str | None = None
+    interest_base: str | None = None
+    period_counting_method: str | None = None
+    period_day_block: StrictInt | None = None
+    deposit_due_date_mode: str | None = None
+    deposit_due_offset_days: StrictInt | None = None
+    deposit_due_day: StrictInt | None = None
+    # A contractor deposit deadline is independently governed from an
+    # interest-rate policy.  Its values remain blank in a draft; approval
+    # rejects an incomplete configuration instead of supplying a default.
+    policy_kind: str | None = None
+    deductor_type: str | None = None
+    challan_route: str | None = None
+    deadline_mode: str | None = None
+    days_after_month_end: StrictInt | None = None
+    deadline_month: StrictInt | None = None
+    deadline_day: StrictInt | None = None
 
     @model_validator(mode="after")
     def validate_scope(self):
@@ -522,6 +613,54 @@ class TdsComplianceRuleBody(BaseModel):
             raise ValueError("assignment_id is required for assignment scope.")
         if self.effective_from and self.effective_to and self.effective_from > self.effective_to:
             raise ValueError("Effective dates are reversed.")
+        if self.recipient_residency is not None:
+            self.recipient_residency = self.recipient_residency.upper()
+            if self.recipient_residency not in RECIPIENT_RESIDENCIES:
+                raise ValueError("recipient_residency must be RESIDENT, NON_RESIDENT, or FOREIGN_COMPANY.")
+        for field, allowed in (("recipient_category", RECIPIENT_CATEGORIES), ("payer_category", PAYER_CATEGORIES)):
+            value = getattr(self, field)
+            if value is not None:
+                value = value.upper()
+                if value not in allowed:
+                    raise ValueError(f"{field} is not a controlled category.")
+                setattr(self, field, value)
+        if self.generalized_selection_required and not self.recipient_residency:
+            raise ValueError("generalized_selection_required requires recipient_residency.")
+        if self.interest_type and self.interest_type not in {"DEDUCTION_DELAY_INTEREST", "DEPOSIT_DELAY_INTEREST"}:
+            raise ValueError("interest_type must be DEDUCTION_DELAY_INTEREST or DEPOSIT_DELAY_INTEREST.")
+        if self.policy_kind and self.policy_kind != "CONTRACTOR_DEPOSIT_DUE_DATE":
+            raise ValueError("Unsupported policy_kind.")
+        if self.policy_kind and self.interest_type:
+            raise ValueError("A contractor due-date policy cannot also be an interest policy.")
+        if self.deductor_type and self.deductor_type not in {"GOVERNMENT_OFFICE", "OTHER_DEDUCTOR"}:
+            raise ValueError("Unsupported deductor_type.")
+        if self.challan_route and self.challan_route not in {"WITH_CHALLAN", "WITHOUT_CHALLAN"}:
+            raise ValueError("Unsupported challan_route.")
+        if self.deadline_mode and self.deadline_mode not in {"DEDUCTION_DATE", "MONTH_END_PLUS_DAYS", "FIXED_MONTH_DAY"}:
+            raise ValueError("Unsupported deadline_mode.")
+        if self.days_after_month_end is not None and self.days_after_month_end < 0:
+            raise ValueError("days_after_month_end cannot be negative.")
+        if self.deadline_month is not None and not 1 <= self.deadline_month <= 12:
+            raise ValueError("deadline_month must be between 1 and 12.")
+        if self.deadline_day is not None and not 1 <= self.deadline_day <= 31:
+            raise ValueError("deadline_day must be between 1 and 31.")
+        if self.interest_base and self.interest_base not in {"expected_tds", "actual_tds", "tax_not_deducted", "tax_short_deducted"}:
+            raise ValueError("Unsupported interest_base.")
+        if self.rate_unit and self.rate_unit != "PERCENT_PER_PERIOD":
+            raise ValueError("interest-policy rate_unit must be PERCENT_PER_PERIOD.")
+        if self.period_counting_method and self.period_counting_method not in {"CALENDAR_MONTH_OR_PART", "CONFIGURED_FIXED_DAY_BLOCK"}:
+            raise ValueError("Unsupported period_counting_method.")
+        if self.deposit_due_date_mode and self.deposit_due_date_mode not in {"FIXED_OFFSET_DAYS", "NEXT_MONTH_CONFIGURED_DAY", "CHALLAN_CUM_STATEMENT"}:
+            raise ValueError("Unsupported deposit_due_date_mode.")
+        if self.period_day_block is not None and self.period_day_block <= 0:
+            raise ValueError("period_day_block must be positive.")
+        if self.deposit_due_offset_days is not None and self.deposit_due_offset_days < 0:
+            raise ValueError("deposit_due_offset_days cannot be negative.")
+        if self.deposit_due_day is not None and not 1 <= self.deposit_due_day <= 31:
+            raise ValueError("deposit_due_day must be between 1 and 31.")
+        traceability_errors = source_traceability_errors(self.model_dump())
+        if traceability_errors:
+            raise ValueError("; ".join(traceability_errors))
         return self
 
 
@@ -549,12 +688,106 @@ class TdsClassificationMappingBody(BaseModel):
         return self
 
 
+CLASSIFICATION_FACT_TYPES = {
+    "PARTY_CAPACITY",
+    "ASSET_INSTRUMENT_SCHEME",
+    "SERVICE_ACTIVITY_CHANNEL",
+    "AGREEMENT_HISTORIC_PROVISION",
+}
+CLASSIFICATION_FACT_EVIDENCE_STATUSES = {
+    "VERIFIED", "UNVERIFIED", "UNKNOWN", "CONTRADICTED", "NOT_APPLICABLE",
+}
+SOURCE_CONDITION_REFERENCE_PATTERN = re.compile(r"CA-FY2026-27-(?:RES|NR)-[0-9]{2}$")
+VALUE_CODE_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{1,79}$")
+
+
+class TdsClassificationFact(BaseModel):
+    """Source-anchored fact retained for future governed catalog predicates.
+
+    Facts are evidence records, not statutory-rule selections.  No rule may
+    consume a fact unless its configured predicate explicitly names the same
+    type, value and source condition in a future governed catalog version.
+    """
+    model_config = ConfigDict(extra="forbid")
+    fact_type: str
+    value_code: str | None = None
+    evidence_status: str
+    evidence_reference: str | None = None
+    source_condition_reference: str
+    review_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_source_anchored_fact(self):
+        self.fact_type = self.fact_type.upper()
+        self.evidence_status = self.evidence_status.upper()
+        if self.fact_type not in CLASSIFICATION_FACT_TYPES:
+            raise ValueError("Unsupported classification fact_type.")
+        if self.evidence_status not in CLASSIFICATION_FACT_EVIDENCE_STATUSES:
+            raise ValueError("Unsupported classification evidence_status.")
+        if not SOURCE_CONDITION_REFERENCE_PATTERN.fullmatch(self.source_condition_reference):
+            raise ValueError("source_condition_reference must identify a FY 2026-27 CA source row.")
+        if self.value_code is not None:
+            self.value_code = self.value_code.upper()
+            if not VALUE_CODE_PATTERN.fullmatch(self.value_code):
+                raise ValueError("value_code must use a controlled uppercase code.")
+        if self.evidence_status == "VERIFIED" and (not self.value_code or not str(self.evidence_reference or "").strip()):
+            raise ValueError("VERIFIED classification facts require value_code and evidence_reference.")
+        if self.evidence_status in {"UNVERIFIED", "UNKNOWN", "CONTRADICTED"} and not str(self.review_reason or "").strip():
+            raise ValueError("Unresolved classification facts require review_reason.")
+        return self
+
+
 class TdsTransactionClassificationBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     payment_nature: str
     section_reference: str | None = None
     deductee_type: str | None = None
+    recipient_residency: str | None = None
+    recipient_category: str | None = None
+    payer_category: str | None = None
+    classification_facts: list[TdsClassificationFact] = Field(default_factory=list)
+    # Optional controlled contractor evidence. Supplying these fields never
+    # approves a statutory rule; it permits the domain layer to retain a
+    # review-only applicability decision rather than infer it from a label.
+    contractor_control_contract: str | None = None
+    payer_eligibility_status: str | None = None
+    payer_eligibility_evidence_reference: str | None = None
+    contractor_residency_status: str | None = None
+    contractor_residency_evidence_reference: str | None = None
+    contractor_exception_status: str | None = None
+    contractor_exception_type: str | None = None
+    contractor_exception_evidence_reference: str | None = None
+    pan_operational_status: str | None = None
+    pan_evidence_reference: str | None = None
+    deductor_type: str | None = None
+    challan_route: str | None = None
+    contractor_personal_purpose_attestation: StrictBool | None = None
+    contractor_personal_purpose_payer_type: str | None = None
+    contractor_personal_purpose_payer_type_evidence_reference: str | None = None
+    goods_carriage_count: StrictInt | None = None
+    goods_carriage_business_evidence_reference: str | None = None
+    goods_carriage_declaration_reference: str | None = None
+    goods_carriage_pan_reference: str | None = None
+    goods_carriage_particulars_reference: str | None = None
+    contractor_invoice_material_status: str | None = None
+    contractor_invoice_material_evidence_reference: str | None = None
     reason: str = "CA review classification"
+
+    @model_validator(mode="after")
+    def validate_contractor_control(self):
+        if self.recipient_residency is not None:
+            self.recipient_residency = self.recipient_residency.upper()
+            if self.recipient_residency not in RECIPIENT_RESIDENCIES:
+                raise ValueError("recipient_residency must be RESIDENT, NON_RESIDENT, or FOREIGN_COMPANY.")
+        fields = (self.payer_eligibility_status, self.payer_eligibility_evidence_reference, self.contractor_residency_status, self.contractor_residency_evidence_reference, self.contractor_exception_status, self.contractor_exception_type, self.contractor_exception_evidence_reference, self.pan_operational_status, self.pan_evidence_reference, self.deductor_type, self.challan_route, self.contractor_personal_purpose_attestation, self.contractor_personal_purpose_payer_type, self.contractor_personal_purpose_payer_type_evidence_reference, self.goods_carriage_count, self.goods_carriage_business_evidence_reference, self.goods_carriage_declaration_reference, self.goods_carriage_pan_reference, self.goods_carriage_particulars_reference, self.contractor_invoice_material_status, self.contractor_invoice_material_evidence_reference)
+        if self.contractor_control_contract is not None and self.contractor_control_contract != "CONTRACTOR_WITHHOLDING_V1":
+            raise ValueError("Unsupported contractor_control_contract.")
+        if any(value is not None for value in fields) and self.contractor_control_contract != "CONTRACTOR_WITHHOLDING_V1":
+            raise ValueError("Controlled contractor evidence requires contractor_control_contract=CONTRACTOR_WITHHOLDING_V1.")
+        keys = [(fact.fact_type, fact.source_condition_reference) for fact in self.classification_facts]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Only one classification fact is permitted for each fact_type and source condition.")
+        return self
 
 
 class TdsTransactionReviewBody(BaseModel):
@@ -654,16 +887,20 @@ def _mapping_matches_row(mapping: dict, row: dict) -> bool:
     return bool(checks) and all(checks)
 
 
-def _apply_classification_mappings(assignment: dict, rows: list[dict]) -> list[dict]:
+def _apply_classification_mappings(assignment: dict, rows: list[dict], ledger_version_id: str | None = None) -> list[dict]:
     """Derive only from explicit, scoped CA mappings; never infer free text."""
     mappings = list(db.tds_compliance_classification_mappings.find({"workflow": TDS_COMPLIANCE_WORKFLOW, "organization_id": assignment["organization_id"], "active": True}, NO_ID))
-    overrides = {item["transaction_id"]: item for item in db.tds_compliance_transaction_classifications.find({"assignment_id": assignment["assignment_id"]}, NO_ID)}
+    classification_query = {"assignment_id": assignment["assignment_id"]}
+    if ledger_version_id:
+        classification_query["ledger_version_id"] = ledger_version_id
+    overrides = {item["transaction_id"]: item for item in db.tds_compliance_transaction_classifications.find(classification_query, NO_ID)}
     output = []
     for source in rows:
         row = dict(source)
         override = overrides.get(row.get("transaction_id"))
         if override:
-            row.update({"payment_nature": override["payment_nature"], "section_input": override.get("section_reference") or row.get("section_input"), "deductee_type": override.get("deductee_type") or row.get("deductee_type"), "payment_nature_source": "CA_REVIEW", "payment_nature_confidence": "HIGH", "payment_nature_status": "CLASSIFIED", "classification_reason": override.get("reason"), "classification_reviewed_at": override.get("reviewed_at"), "classification_reviewer": override.get("reviewed_by")})
+            controlled = {key: override.get(key) for key in ("recipient_residency", "recipient_category", "payer_category", "classification_facts", "contractor_control_contract", "payer_eligibility_status", "payer_eligibility_evidence_reference", "contractor_residency_status", "contractor_residency_evidence_reference", "contractor_exception_status", "contractor_exception_type", "contractor_exception_evidence_reference", "pan_operational_status", "pan_evidence_reference", "deductor_type", "challan_route", "contractor_personal_purpose_attestation", "contractor_personal_purpose_payer_type", "contractor_personal_purpose_payer_type_evidence_reference", "goods_carriage_count", "goods_carriage_business_evidence_reference", "goods_carriage_declaration_reference", "goods_carriage_pan_reference", "goods_carriage_particulars_reference", "contractor_invoice_material_status", "contractor_invoice_material_evidence_reference") if override.get(key) is not None}
+            row.update({"payment_nature": override["payment_nature"], "section_input": override.get("section_reference") or row.get("section_input"), "deductee_type": override.get("deductee_type") or row.get("deductee_type"), "payment_nature_source": "CA_REVIEW", "payment_nature_confidence": "HIGH", "payment_nature_status": "CLASSIFIED", "classification_reason": override.get("reason"), "classification_reviewed_at": override.get("reviewed_at"), "classification_reviewer": override.get("reviewed_by"), **controlled})
             output.append(row); continue
         if str(row.get("payment_nature") or "").strip():
             row.update({"payment_nature_source": "SOURCE_PROVIDED", "payment_nature_confidence": "HIGH", "classification_reason": "Payment nature was provided by the source ledger."})
@@ -688,9 +925,24 @@ def _apply_classification_mappings(assignment: dict, rows: list[dict]) -> list[d
 def list_tds_classification_review(assignment_id: str, principal: Principal = Depends(_tds_compliance_security_boundary)):
     assignment = _tds_assignment_or_404(assignment_id)
     _mapping_access(principal, assignment, "view_results")
-    _, rows = _ledger_for_calculation(assignment_id, None)
-    classified = _apply_classification_mappings(assignment, rows)
-    return {"items": [{key: row.get(key) for key in ("transaction_id", "payment_date", "credit_date", "deductee_name", "description", "amount", "payment_nature", "payment_nature_source", "payment_nature_confidence", "payment_nature_status", "section_input", "classification_reason")} for row in classified]}
+    version, rows = _ledger_for_calculation(assignment_id, None)
+    classified = _apply_classification_mappings(assignment, rows, version.get("ledger_version_id"))
+    fields = (
+        "transaction_id", "payment_date", "credit_date", "deductee_name", "description", "amount",
+        "payment_nature", "payment_nature_source", "payment_nature_confidence", "payment_nature_status",
+        "recipient_residency", "recipient_category", "payer_category", "section_input", "deductee_type",
+        "classification_reason", "classification_facts", "contractor_control_contract", "payer_eligibility_status",
+        "payer_eligibility_evidence_reference", "contractor_residency_status",
+        "contractor_residency_evidence_reference", "contractor_exception_status",
+        "contractor_exception_type", "contractor_exception_evidence_reference", "pan_operational_status",
+        "pan_evidence_reference", "deductor_type", "challan_route",
+        "contractor_personal_purpose_attestation", "contractor_personal_purpose_payer_type",
+        "contractor_personal_purpose_payer_type_evidence_reference", "goods_carriage_count",
+        "goods_carriage_business_evidence_reference", "goods_carriage_declaration_reference",
+        "goods_carriage_pan_reference", "goods_carriage_particulars_reference",
+        "contractor_invoice_material_status", "contractor_invoice_material_evidence_reference",
+    )
+    return {"items": [{key: row.get(key) for key in fields} for row in classified]}
 
 
 @app.put("/api/tds-compliance/assignments/{assignment_id}/classification-review/{transaction_id}")
@@ -731,6 +983,10 @@ def _record_rule_revision(rule: dict, action: str, principal: Principal) -> None
 
 
 def _approval_errors(rule: dict) -> list[str]:
+    if rule.get("policy_kind") == "CONTRACTOR_DEPOSIT_DUE_DATE":
+        return _contractor_due_date_policy_approval_errors(rule)
+    if rule.get("interest_type"):
+        return _interest_rule_approval_errors(rule)
     required = ("financial_year", "effective_from", "effective_to", "governing_act", "payment_nature", "deductee_type", "section_reference", "rate", "threshold_type", "calculation_basis", "rounding_method", "rounding_precision", "source", "source_reference")
     errors = [field for field in required if rule.get(field) in {None, ""}]
     if rule.get("threshold_type") != "NO_THRESHOLD" and rule.get("threshold") in {None, ""}:
@@ -741,6 +997,144 @@ def _approval_errors(rule: dict) -> list[str]:
     if rule.get("effective_from") and rule.get("effective_to") and rule["effective_from"] > rule["effective_to"]:
         errors.append("effective_date_range")
     return errors
+
+
+def _contractor_due_date_policy_approval_errors(rule: dict) -> list[str]:
+    """Validate the independent governed deadline configuration at approval."""
+    required = (
+        "financial_year", "effective_from", "effective_to", "governing_act",
+        "payment_nature", "deductee_type", "section_reference", "deductor_type",
+        "deadline_mode", "source", "source_reference", "source_url",
+        "source_document_title", "source_provision_reference", "source_retrieved_at",
+        "source_verification_evidence",
+    )
+    errors = [field for field in required if rule.get(field) in {None, ""}]
+    if rule.get("payment_nature") != "contractor":
+        errors.append("payment_nature")
+    if rule.get("deductor_type") not in {"GOVERNMENT_OFFICE", "OTHER_DEDUCTOR"}:
+        errors.append("deductor_type")
+    if rule.get("deductor_type") == "GOVERNMENT_OFFICE" and rule.get("challan_route") not in {"WITH_CHALLAN", "WITHOUT_CHALLAN"}:
+        errors.append("challan_route")
+    mode = rule.get("deadline_mode")
+    if mode not in {"DEDUCTION_DATE", "MONTH_END_PLUS_DAYS", "FIXED_MONTH_DAY"}:
+        errors.append("deadline_mode")
+    elif mode == "MONTH_END_PLUS_DAYS" and (not isinstance(rule.get("days_after_month_end"), int) or rule["days_after_month_end"] < 0):
+        errors.append("days_after_month_end")
+    elif mode == "FIXED_MONTH_DAY" and (
+        not isinstance(rule.get("deadline_month"), int)
+        or not 1 <= rule["deadline_month"] <= 12
+        or not isinstance(rule.get("deadline_day"), int)
+        or not 1 <= rule["deadline_day"] <= 31
+    ):
+        errors.extend(("deadline_month", "deadline_day"))
+    try:
+        start, end = date.fromisoformat(str(rule.get("effective_from"))), date.fromisoformat(str(rule.get("effective_to")))
+        if start > end:
+            errors.append("effective_date_range")
+        fy = str(rule.get("financial_year"))
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}", fy) or int(fy[-2:]) != (int(fy[:4]) + 1) % 100:
+            errors.append("financial_year_format")
+        elif end < date(int(fy[:4]), 4, 1) or start > date(int(fy[:4]) + 1, 3, 31):
+            errors.append("financial_year_scope")
+    except (TypeError, ValueError):
+        errors.append("effective_dates")
+    return sorted(set(errors))
+
+
+def _interest_rule_approval_errors(rule: dict) -> list[str]:
+    """Validate every value consumed by the interest engine before approval.
+
+    This is a policy admission check, not a calculation fallback.  It rejects
+    missing or malformed legal configuration rather than choosing defaults.
+    """
+    required = (
+        "financial_year", "effective_from", "effective_to", "governing_act",
+        "payment_nature", "deductee_type", "interest_type", "rate", "rate_unit",
+        "interest_base", "period_counting_method", "rounding_method",
+        "rounding_precision", "source", "source_reference",
+    )
+    errors = [field for field in required if rule.get(field) in {None, ""}]
+    if rule.get("interest_type") not in {"DEDUCTION_DELAY_INTEREST", "DEPOSIT_DELAY_INTEREST"}:
+        errors.append("interest_type")
+    if rule.get("interest_base") not in {"expected_tds", "actual_tds", "tax_not_deducted", "tax_short_deducted"}:
+        errors.append("interest_base")
+    if rule.get("rate_unit") != "PERCENT_PER_PERIOD":
+        errors.append("rate_unit")
+    if rule.get("period_counting_method") not in {"CALENDAR_MONTH_OR_PART", "CONFIGURED_FIXED_DAY_BLOCK"}:
+        errors.append("period_counting_method")
+    if rule.get("period_counting_method") == "CONFIGURED_FIXED_DAY_BLOCK" and not isinstance(rule.get("period_day_block"), int):
+        errors.append("period_day_block")
+    if rule.get("rounding_method") != "HALF_UP":
+        errors.append("rounding_method")
+    if not isinstance(rule.get("rounding_precision"), int) or rule.get("rounding_precision") < 0:
+        errors.append("rounding_precision")
+    try:
+        if Decimal(str(rule.get("rate"))) <= 0:
+            errors.append("rate")
+    except Exception:
+        errors.append("rate")
+    try:
+        start, end = date.fromisoformat(str(rule.get("effective_from"))), date.fromisoformat(str(rule.get("effective_to")))
+        if start > end:
+            errors.append("effective_date_range")
+        fy = str(rule.get("financial_year"))
+        if not re.fullmatch(r"[0-9]{4}-[0-9]{2}", fy) or int(fy[-2:]) != (int(fy[:4]) + 1) % 100:
+            errors.append("financial_year_format")
+        else:
+            fy_start = date(int(fy[:4]), 4, 1)
+            fy_end = date(int(fy[:4]) + 1, 3, 31)
+            if end < fy_start or start > fy_end:
+                errors.append("financial_year_scope")
+    except (TypeError, ValueError):
+        errors.append("effective_dates")
+    # Rule 218 timing belongs to the separately governed Phase 4 due-date
+    # policy. Phase 5 receives its immutable result snapshot, so requiring a
+    # second deadline configuration here would create two sources of truth.
+    return sorted(set(errors))
+
+
+def _conflicting_active_interest_rule(rule: dict) -> dict | None:
+    """Return an equally-prioritised active rule that would make selection unsafe."""
+    if not rule.get("interest_type"):
+        return None
+    candidates = db.tds_compliance_rules.find({
+        "workflow": TDS_COMPLIANCE_WORKFLOW,
+        "lifecycle": "ACTIVE",
+        "active": True,
+        "interest_type": rule["interest_type"],
+        "organization_id": rule.get("organization_id"),
+        "client_id": rule.get("client_id"),
+        "assignment_id": rule.get("assignment_id"),
+        "financial_year": rule.get("financial_year"),
+        "governing_act": rule.get("governing_act"),
+        "payment_nature": rule.get("payment_nature"),
+        "deductee_type": rule.get("deductee_type"),
+        "priority": rule.get("priority"),
+        "rule_id": {"$ne": rule["rule_id"]},
+    }, NO_ID)
+    for candidate in candidates:
+        if str(candidate.get("effective_from")) <= str(rule.get("effective_to")) and str(rule.get("effective_from")) <= str(candidate.get("effective_to")):
+            return candidate
+    return None
+
+
+def _conflicting_active_due_date_policy(rule: dict) -> dict | None:
+    if rule.get("policy_kind") != "CONTRACTOR_DEPOSIT_DUE_DATE":
+        return None
+    candidates = db.tds_compliance_rules.find({
+        "workflow": TDS_COMPLIANCE_WORKFLOW, "lifecycle": "ACTIVE", "active": True,
+        "policy_kind": "CONTRACTOR_DEPOSIT_DUE_DATE",
+        "organization_id": rule.get("organization_id"), "client_id": rule.get("client_id"),
+        "assignment_id": rule.get("assignment_id"), "financial_year": rule.get("financial_year"),
+        "governing_act": rule.get("governing_act"), "payment_nature": rule.get("payment_nature"),
+        "deductee_type": rule.get("deductee_type"), "section_reference": rule.get("section_reference"),
+        "deductor_type": rule.get("deductor_type"), "challan_route": rule.get("challan_route"),
+        "priority": rule.get("priority"), "rule_id": {"$ne": rule["rule_id"]},
+    }, NO_ID)
+    for candidate in candidates:
+        if str(candidate.get("effective_from")) <= str(rule.get("effective_to")) and str(rule.get("effective_from")) <= str(candidate.get("effective_to")):
+            return candidate
+    return None
 
 
 def _rule_document(body: TdsComplianceRuleBody, principal: Principal, *, rule_id: str | None = None, version: int = 1, family_id: str | None = None) -> dict:
@@ -755,10 +1149,12 @@ def _rule_document(body: TdsComplianceRuleBody, principal: Principal, *, rule_id
             raise HTTPException(422, "Assignment scope must match the rule organisation and client.")
     now = now_iso()
     identifier = rule_id or f"TDCR-{uuid.uuid4().hex[:12].upper()}"
-    return {**data, "rule_id": identifier, "rule_family_id": family_id or identifier, "rule_version": f"v{version}", "version": version,
+    rule = {**data, "rule_id": identifier, "rule_family_id": family_id or identifier, "rule_version": f"v{version}", "version": version,
             "workflow": TDS_COMPLIANCE_WORKFLOW, "lifecycle": "DRAFT", "active": False,
             "created_at": now, "updated_at": now, "created_by": principal.user_id, "updated_by": principal.user_id,
             "approved_at": None, "approved_by": None, "activated_at": None, "activated_by": None}
+    traceability = source_traceability_snapshot(rule)
+    return {**rule, "source_traceability": traceability, "source_traceability_status": traceability["status"]}
 
 
 @app.post("/api/tds-compliance/rules", status_code=201)
@@ -836,7 +1232,9 @@ def approve_tds_compliance_rule(rule_id: str, principal: Principal = Depends(_td
     if rule.get("lifecycle") != "PENDING_APPROVAL":
         raise HTTPException(409, "Only a rule pending approval can be approved.")
     now = now_iso()
-    db.tds_compliance_rules.update_one({"rule_id": rule_id, "lifecycle": "PENDING_APPROVAL"}, {"$set": {"lifecycle": "APPROVED", "active": False, "approved_at": now, "approved_by": principal.user_id, "updated_at": now, "updated_by": principal.user_id}})
+    approval = {"lifecycle": "APPROVED", "active": False, "approved_at": now, "approved_by": principal.user_id, "updated_at": now, "updated_by": principal.user_id}
+    traceability = source_traceability_snapshot({**rule, **approval})
+    db.tds_compliance_rules.update_one({"rule_id": rule_id, "lifecycle": "PENDING_APPROVAL"}, {"$set": {**approval, "source_traceability": traceability, "source_traceability_status": traceability["status"]}})
     approved = _rule_or_404(rule_id)
     _record_rule_revision(approved, "APPROVED", principal)
     _audit_tds_rule("RULE_APPROVED", approved, principal, old_value={"lifecycle": "PENDING_APPROVAL"}, new_value={"lifecycle": "APPROVED"})
@@ -850,6 +1248,12 @@ def activate_tds_compliance_rule(rule_id: str, principal: Principal = Depends(_t
     if rule.get("lifecycle") != "APPROVED":
         raise HTTPException(409, "Only an approved rule can be activated.")
     now = now_iso()
+    activation_errors = governed_activation_errors(rule)
+    if activation_errors:
+        raise HTTPException(422, "Rule cannot be activated until governed evidence is complete: " + ", ".join(activation_errors))
+    conflict = _conflicting_active_due_date_policy(rule) or _conflicting_active_interest_rule(rule)
+    if conflict:
+        raise HTTPException(409, f"Activation would create an ambiguous active policy scope with {conflict['rule_id']}.")
     # The new approved version becomes effective atomically in governance
     # terms: prior active versions in the same family are retained but no
     # longer eligible to calculate.
@@ -1121,7 +1525,7 @@ def list_tds_compliance_transactions(assignment_id: str, calculation_id: str | N
         item = {**result, "transaction_status": _tds_transaction_status(result), "review": reviews.get(result.get("transaction_id")), "payment_date": source.get("payment_date"), "credit_date": source.get("credit_date"), "amount": source.get("amount"), "invoice_number": source.get("invoice_number"), "source_file_name": source.get("source_file_name"), "source_row_number": source.get("source_row_number"), "ledger_version_id": calculation["ledger_version_id"]}
         items.append(item)
     summary = {"total_transactions": len(items), "classified": sum(item.get("payment_nature_status") == "CLASSIFIED" for item in items), "classification_review": sum(item.get("payment_nature_status") != "CLASSIFIED" for item in items), "calculated": sum(item.get("calculation_status") == "CALCULATED" for item in items), "matched": sum(item["transaction_status"] == "MATCHED" for item in items), "short_deduction": sum(item["transaction_status"] == "SHORT_DEDUCTION" for item in items), "excess_deduction": sum(item["transaction_status"] == "EXCESS_DEDUCTION" for item in items), "rule_not_found": sum(item["transaction_status"] == "RULE_NOT_FOUND" for item in items), "insufficient_data": sum(item["transaction_status"] == "INSUFFICIENT_DATA" for item in items), "actual_tds_missing": sum(item["transaction_status"] == "ACTUAL_TDS_NOT_PROVIDED" for item in items), "other_review": sum(item["transaction_status"] == "REVIEW_REQUIRED" for item in items), **_tds_transaction_totals(items)}
-    return {"assignment_id": assignment_id, "calculation": calculation, "summary": summary, "items": items}
+    return _tds_api_value({"assignment_id": assignment_id, "calculation": calculation, "summary": summary, "items": items})
 
 
 @app.post("/api/tds-compliance/assignments/{assignment_id}/transactions/{transaction_id}/review")
@@ -1151,7 +1555,7 @@ def _calculation_preview(assignment_id: str, ledger_version_id: str | None) -> t
     assignment = _tds_assignment_or_404(assignment_id)
     version, rows = _ledger_for_calculation(assignment_id, ledger_version_id)
     rules = list(db.tds_compliance_rules.find({"workflow": TDS_COMPLIANCE_WORKFLOW}, NO_ID))
-    classified_rows = _apply_classification_mappings(assignment, rows)
+    classified_rows = _apply_classification_mappings(assignment, rows, version.get("ledger_version_id"))
     results = freeze_calculation_results(calculate_ledger_transactions(classified_rows, rules, assignment_id=assignment_id))
     return assignment, version, results
 
@@ -1175,7 +1579,10 @@ def run_tds_calculation(assignment_id: str, body: CalculationPreviewBody):
     run = {"calculation_id": calculation_id, "workflow": TDS_COMPLIANCE_WORKFLOW, "assignment_id": assignment_id, "organization_id": assignment.get("organization_id"), "client_id": assignment.get("client_id"), "ledger_version_id": version["ledger_version_id"], "rule_versions": rule_versions, "created_at": created_at, "created_by": None, "summary": _calculation_summary(results)}
     db.tds_compliance_calculation_runs.insert_one(dict(run))
     if results:
-        db.tds_compliance_calculation_results.insert_many([{**item, "calculation_id": calculation_id, "ledger_version_id": version["ledger_version_id"], "workflow": TDS_COMPLIANCE_WORKFLOW, "calculated_at": created_at} for item in results])
+        db.tds_compliance_calculation_results.insert_many([
+            _tds_mongo_snapshot({**item, "calculation_id": calculation_id, "ledger_version_id": version["ledger_version_id"], "workflow": TDS_COMPLIANCE_WORKFLOW, "calculated_at": created_at})
+            for item in results
+        ])
     _audit_tds_compliance("CALCULATION_RUN", assignment, entity_id=calculation_id, new_value={"ledger_version_id": version["ledger_version_id"], "rule_versions": rule_versions, "transaction_count": len(results)})
     return {"calculation": run, "items": results}
 
@@ -1193,7 +1600,7 @@ def get_tds_calculation(assignment_id: str, calculation_id: str):
     run = db.tds_compliance_calculation_runs.find_one({"assignment_id": assignment_id, "calculation_id": calculation_id}, NO_ID)
     if not run:
         raise HTTPException(404, "TDS Compliance calculation run not found.")
-    return {"calculation": run, "items": list(db.tds_compliance_calculation_results.find({"assignment_id": assignment_id, "calculation_id": calculation_id}, NO_ID).sort("transaction_id", ASCENDING))}
+    return _tds_api_value({"calculation": run, "items": list(db.tds_compliance_calculation_results.find({"assignment_id": assignment_id, "calculation_id": calculation_id}, NO_ID).sort("transaction_id", ASCENDING))})
 
 
 @app.get("/api/tds-compliance/assignments/{assignment_id}/calculations/{calculation_id}/summary")
@@ -1317,7 +1724,8 @@ def run_persisted_interest_compliance(assignment_id: str, body: InterestComplian
         raise HTTPException(409, "This assignment is locked; an interest-compliance run cannot be created.")
     interest_run_id, created_at = f"TDCI-{uuid.uuid4().hex[:14].upper()}", now_iso()
     rule_versions = sorted({f"{item.get('deduction_rule_snapshot', {}).get('rule_id')}:{item.get('deduction_rule_snapshot', {}).get('rule_version')}" for item in items if item.get("deduction_rule_snapshot")} | {f"{item.get('deposit_rule_snapshot', {}).get('rule_id')}:{item.get('deposit_rule_snapshot', {}).get('rule_version')}" for item in items if item.get("deposit_rule_snapshot")})
-    run = {"interest_run_id": interest_run_id, "workflow": TDS_COMPLIANCE_WORKFLOW, "assignment_id": assignment_id, "organization_id": assignment.get("organization_id"), "client_id": assignment.get("client_id"), "financial_year": assignment.get("financial_year"), "quarter": assignment.get("quarter"), "calculation_id": body.calculation_id, "deposit_run_id": body.deposit_run_id, "deposit_evidence_version_id": deposit_run.get("evidence_version_id"), "ledger_version_id": calculation.get("ledger_version_id"), "policy_versions": rule_versions, "created_at": created_at, "created_by": principal.user_id, "summary": _interest_compliance_summary(items)}
+    due_date_policy_versions = sorted({f"{item.get('due_date_policy_snapshot', {}).get('rule_id') or item.get('due_date_policy_snapshot', {}).get('policy_id')}:{item.get('due_date_policy_snapshot', {}).get('rule_version') or item.get('due_date_policy_snapshot', {}).get('policy_version')}" for item in items if item.get("due_date_policy_snapshot")})
+    run = {"interest_run_id": interest_run_id, "workflow": TDS_COMPLIANCE_WORKFLOW, "assignment_id": assignment_id, "organization_id": assignment.get("organization_id"), "client_id": assignment.get("client_id"), "financial_year": assignment.get("financial_year"), "quarter": assignment.get("quarter"), "calculation_id": body.calculation_id, "deposit_run_id": body.deposit_run_id, "deposit_evidence_version_id": deposit_run.get("evidence_version_id"), "ledger_version_id": calculation.get("ledger_version_id"), "policy_versions": rule_versions, "due_date_policy_versions": due_date_policy_versions, "created_at": created_at, "created_by": principal.user_id, "summary": _interest_compliance_summary(items)}
     db.tds_compliance_interest_runs.insert_one(dict(run))
     if items:
         db.tds_compliance_interest_results.insert_many([{**item, "interest_run_id": interest_run_id, "workflow": TDS_COMPLIANCE_WORKFLOW, "calculated_at": created_at} for item in freeze_calculation_results(items)])
@@ -1874,20 +2282,27 @@ def _deposit_compliance_preview(assignment_id: str, body: DepositEvidenceBody):
     if body.interest_run_id and not db.tds_compliance_interest_runs.find_one({"assignment_id": assignment_id, "interest_run_id": body.interest_run_id, "calculation_id": body.calculation_id}):
         raise HTTPException(404, "Phase 4 run not found for this calculation.")
     evidence = list(db.tds_compliance_deposit_evidence_rows.find({"assignment_id": assignment_id, "evidence_version_id": version_id}, NO_ID)) if version_id else []
-    phase3_rows = list(db.tds_compliance_calculation_results.find({"assignment_id": assignment_id, "calculation_id": body.calculation_id}, NO_ID))
+    phase3_query = {"assignment_id": assignment_id, "calculation_id": body.calculation_id}
+    # A calculation ID identifies the run, whose ledger version is frozen at
+    # creation.  Keep the source results in that same version so a stale or
+    # malformed result record cannot enter this Phase 4 decision.
+    if calc.get("ledger_version_id"):
+        phase3_query["ledger_version_id"] = calc["ledger_version_id"]
+    phase3_rows = list(db.tds_compliance_calculation_results.find(phase3_query, NO_ID))
     ledger_by_transaction = {row.get("transaction_id"): row for row in db.tds_compliance_ledger_rows.find({"assignment_id": assignment_id, "ledger_version_id": calc.get("ledger_version_id")}, NO_ID)}
     # New Phase 4 snapshots retain source-provided deduction-date context for
     # later Phase 5 use.  Historical records without it remain review-only.
-    phase3 = [{**row, "actual_deduction_date": ledger_by_transaction.get(row.get("transaction_id"), {}).get("deduction_date"), "deductee_type": ledger_by_transaction.get(row.get("transaction_id"), {}).get("deductee_type")} for row in phase3_rows]
+    phase3 = [{**row, "actual_deduction_date": ledger_by_transaction.get(row.get("transaction_id"), {}).get("deduction_date") or row.get("contractor_due_date_context", {}).get("deduction_date"), "deductee_type": row.get("deductee_type") or ledger_by_transaction.get(row.get("transaction_id"), {}).get("deductee_type")} for row in phase3_rows]
     phase4 = list(db.tds_compliance_interest_results.find({"assignment_id": assignment_id, "interest_run_id": body.interest_run_id}, NO_ID)) if body.interest_run_id else []
     policies = list(db.tds_compliance_phase5_policies.find({"workflow": TDS_COMPLIANCE_WORKFLOW, "client_id": assignment.get("client_id"), "organization_id": assignment.get("organization_id"), "$or": [{"assignment_id": assignment_id}, {"assignment_id": None}]}, NO_ID))
+    due_date_policies = list(db.tds_compliance_rules.find({"workflow": TDS_COMPLIANCE_WORKFLOW, "policy_kind": "CONTRACTOR_DEPOSIT_DUE_DATE", "$and": [{"$or": [{"organization_id": assignment.get("organization_id")}, {"organization_id": None}, {"scope": "GLOBAL"}]}, {"$or": [{"client_id": assignment.get("client_id")}, {"client_id": None}, {"scope": "GLOBAL"}]}, {"$or": [{"assignment_id": assignment_id}, {"assignment_id": None}, {"scope": {"$ne": "ASSIGNMENT"}}]}]}, NO_ID))
     relationships = []
     for relationship_id in body.relationship_ids:
         relationship = db.tds_compliance_deposit_relationships.find_one({"assignment_id": assignment_id, "client_id": assignment.get("client_id"), "calculation_id": body.calculation_id, "evidence_version_id": version_id, "relationship_id": relationship_id}, NO_ID)
         if not relationship:
             raise HTTPException(404, "Deposit relationship not found for these inputs.")
         relationships.append(relationship)
-    return assignment, calc, version_id, calculate_deposit_compliance(phase3, evidence, phase4, assignment_id=assignment_id, calculation_id=body.calculation_id, evidence_version_id=version_id, policies=policies, relationships=relationships)
+    return assignment, calc, version_id, calculate_deposit_compliance(phase3, evidence, phase4, assignment_id=assignment_id, calculation_id=body.calculation_id, evidence_version_id=version_id, policies=policies, due_date_policies=due_date_policies, relationships=relationships)
 
 
 @app.post("/api/tds-compliance/assignments/{assignment_id}/deposit-compliance/preview")

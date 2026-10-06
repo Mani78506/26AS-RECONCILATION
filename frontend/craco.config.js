@@ -1,6 +1,9 @@
 // craco.config.js
 const path = require("path");
-require("dotenv").config();
+
+// react-scripts loads .env variants before this configuration is evaluated.
+// Loading .env here would pre-populate process.env and prevent CRA's
+// documented .env.local override from selecting a live local backend.
 
 // Check if we're in development/preview mode (not production build)
 // Craco sets NODE_ENV=development for start, NODE_ENV=production for build

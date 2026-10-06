@@ -1,0 +1,83 @@
+{
+  "documentation": {
+    "purpose": "E2E-only input for the opt-in Phase 5 interest-policy provisioner.",
+    "mandatory_notice": "CA-approved/statutory values must be supplied before E2E Phase 5 can become calculation-ready.",
+    "usage": "Copy this file outside the repository, replace every null placeholder with a CA-approved value, then set TDS_E2E_PHASE5_POLICY_FILE to that copy.",
+    "safety": "This example is intentionally incomplete and must fail preflight. It is never loaded automatically."
+  },
+  "policies": [
+    {
+      "organization_id": null,
+      "scope": "ASSIGNMENT",
+      "client_id": null,
+      "assignment_id": null,
+      "financial_year": null,
+      "effective_from": null,
+      "effective_to": null,
+      "governing_act": null,
+      "payment_nature": null,
+      "deductee_type": null,
+      "interest_type": "DEDUCTION_DELAY_INTEREST",
+      "rate": null,
+      "rate_unit": "PERCENT_PER_PERIOD",
+      "interest_base": null,
+      "period_counting_method": null,
+      "period_day_block": null,
+      "rounding_method": "HALF_UP",
+      "rounding_precision": null,
+      "source": null,
+      "source_reference": null,
+      "source_url": null,
+      "source_document_title": null,
+      "source_provision_reference": null,
+      "source_retrieved_at": null,
+      "source_verified_at": null,
+      "source_verification_evidence": null,
+      "priority": null,
+      "approval_metadata": {
+        "approved_source": null,
+        "approval_authority": null,
+        "approval_reference": null,
+        "approved_by": null,
+        "approved_at": null
+      }
+    },
+    {
+      "organization_id": null,
+      "scope": "ASSIGNMENT",
+      "client_id": null,
+      "assignment_id": null,
+      "financial_year": null,
+      "effective_from": null,
+      "effective_to": null,
+      "governing_act": null,
+      "payment_nature": null,
+      "deductee_type": null,
+      "interest_type": "DEPOSIT_DELAY_INTEREST",
+      "rate": null,
+      "rate_unit": "PERCENT_PER_PERIOD",
+      "interest_base": null,
+      "period_counting_method": null,
+      "period_day_block": null,
+      "rounding_method": "HALF_UP",
+      "rounding_precision": null,
+      "source": null,
+      "source_reference": null,
+      "source_url": null,
+      "source_document_title": null,
+      "source_provision_reference": null,
+      "source_retrieved_at": null,
+      "source_verified_at": null,
+      "source_verification_evidence": null,
+      "priority": null,
+      "approval_metadata": {
+        "approved_source": null,
+        "approval_authority": null,
+        "approval_reference": null,
+        "approved_by": null,
+        "approved_at": null
+      },
+      "phase4_due_date_policy_reference": null
+    }
+  ]
+}

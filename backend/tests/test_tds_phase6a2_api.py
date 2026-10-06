@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import uuid
 
 import pytest
+from bson.decimal128 import Decimal128
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.testclient import TestClient
 from pydantic import BaseModel, ConfigDict
@@ -145,6 +146,7 @@ def api(tmp_path, request):
         "list_return_audit_exceptions",
         "list_return_audit_review_decisions",
         "create_return_audit_review_decision",
+        "_tds_api_value",
     }
     tree = ast.parse(
         (Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8")
@@ -171,6 +173,7 @@ def api(tmp_path, request):
         BaseModel=BaseModel,
         ConfigDict=ConfigDict,
         NO_ID={"_id": 0},
+        Decimal128=Decimal128,
         DESCENDING=-1,
         uuid=uuid,
         TDS_COMPLIANCE_WORKFLOW="TDS_COMPLIANCE",
@@ -192,6 +195,32 @@ def api(tmp_path, request):
 
 
 BASE = "/api/tds-compliance/assignments/A/return-audit"
+
+
+def test_results_endpoint_serializes_nested_decimal128_without_mutating_evidence(api):
+    client, db, _ = api
+    stored = {
+        "result_id": "DECIMAL-RESULT",
+        "assignment_id": "A",
+        "audit_run_id": "RUN-DECIMAL",
+        "created_at": "2026-10-06T00:00:00+00:00",
+        "status": "REVIEW_REQUIRED",
+        "expected_tds": Decimal128("500.25"),
+        "source_references": {"deposit": {"amount": Decimal128("500.25")}},
+        "review_reasons": ["Persisted evidence requires review."],
+    }
+    db.tds_compliance_return_audit_results.insert_one(stored)
+
+    response = client.get(BASE + "/results", params={"audit_run_id": "RUN-DECIMAL"})
+
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["result_id"] == "DECIMAL-RESULT"
+    assert str(item["expected_tds"]) == "500.25"
+    assert str(item["source_references"]["deposit"]["amount"]) == "500.25"
+    assert item["review_reasons"] == ["Persisted evidence requires review."]
+    assert isinstance(db.tds_compliance_return_audit_results.rows[0]["expected_tds"], Decimal128)
+    assert isinstance(db.tds_compliance_return_audit_results.rows[0]["source_references"]["deposit"]["amount"], Decimal128)
 
 
 def test_run_persists_full_evidence_and_never_updates_snapshots(api):

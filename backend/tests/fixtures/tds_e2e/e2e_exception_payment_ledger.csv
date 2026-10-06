@@ -1,0 +1,2 @@
+transaction_id,source_reference,deductee_name,deductee_pan,deductee_type,invoice_number,transaction_date,credit_date,payment_date,amount,taxable_amount,payment_nature,section_input,tds_deducted,deduction_date,financial_year,tax_year,quarter
+E2E-X-001,E2E-X-REF-001,Exception Contractor,ABCDE1234F,INDIVIDUAL_HUF,INV-X-001,2026-04-10,2026-04-10,2026-04-10,50000,50000,contractor,393(1),,2026-04-10,2026-27,2027-28,Q1

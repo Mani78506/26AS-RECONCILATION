@@ -43,6 +43,25 @@ def test_missing_pan_rule_not_found_and_ambiguous_are_controlled():
     assert ambiguous["reason_code"] == "RULE_AMBIGUOUS"
 
 
+def test_interest_and_due_date_policies_cannot_be_selected_as_tds_rules():
+    interest_policy = {
+        **RULE_194C,
+        "rule_id": "TEST-INTEREST",
+        "interest_type": "DEPOSIT_DELAY_INTEREST",
+        "rate": "1.5",
+    }
+    due_date_policy = {
+        **RULE_194C,
+        "rule_id": "TEST-DUE-DATE",
+        "policy_kind": "CONTRACTOR_DEPOSIT_DUE_DATE",
+    }
+
+    result = calculate_ledger_transactions([row(tds_deducted="500")], [RULE_194C, interest_policy, due_date_policy])[0]
+
+    assert result["calculation_status"] == "CALCULATED"
+    assert result["rule_id"] == RULE_194C["rule_id"]
+
+
 def test_calculation_rule_snapshot_is_immutable_after_rule_change():
     rule = deepcopy(RULE_194C)
     result = calculate_ledger_transactions([row(tds_deducted="500")], [rule])[0]

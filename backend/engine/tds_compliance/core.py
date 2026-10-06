@@ -16,6 +16,7 @@ from copy import deepcopy
 from ..shared.parser import ParseError, parse_amount, parse_date, parse_rows, read_table
 from ..shared.schema import PAYMENT_LEDGER, TDS_DEPOSIT_EVIDENCE
 from .source_profiles import CA_TDS_WORKING_REFERENCE, TDS_PAYABLE_GL, inspect_tds_source
+from .source_traceability import governed_activation_errors
 
 
 WORKFLOW = "TDS_COMPLIANCE"
@@ -113,7 +114,7 @@ def calculate_compliance_tds(transaction: dict, rules: list[dict], *, cumulative
     return {"calculation_status": "CALCULATED", "applicability": "APPLICABLE", "applicable_rate": float(rate), "threshold_status": threshold_status, "expected_tds": float(expected), "calculation_base": float(base), "excess_amount": None, "pan_adjustment": "NO_PAN_RATE" if status == "NOT_PROVIDED" else None, "certificate_adjustment": None, "rule_id": rule.get("rule_id"), "rule_version": rule.get("rule_version"), "governing_act": law["act"], "section_reference": rule.get("section_reference"), "table_reference": rule.get("table_reference"), "effective_event_date": law["effective_event_date"], "explanation": f"Calculated only from approved rule {rule.get('rule_id')} version {rule.get('rule_version')}.", "warnings": [], "pan_status": status}
 
 
-PAYMENT_LEDGER_SCHEMA = ["transaction_id", "source_reference", "deductee_name", "deductee_pan", "deductee_type", "deductee_gstin", "vendor_code", "invoice_number", "invoice_date", "transaction_date", "credit_date", "payment_date", "amount", "taxable_amount", "payment_nature", "section_input", "description", "tds_expected", "tds_deducted", "tds_deposited", "deduction_date", "deposit_date", "challan_number", "challan_date", "certificate_number", "certificate_rate", "certificate_valid_from", "certificate_valid_to", "financial_year", "tax_year", "quarter"]
+PAYMENT_LEDGER_SCHEMA = ["transaction_id", "source_reference", "deductee_name", "deductee_pan", "deductee_type", "deductee_gstin", "vendor_code", "invoice_number", "invoice_date", "transaction_date", "credit_date", "payment_date", "amount", "taxable_amount", "payment_nature", "recipient_residency", "recipient_category", "payer_category", "section_input", "description", "tds_expected", "tds_deducted", "tds_deposited", "deduction_date", "deposit_date", "challan_number", "challan_date", "certificate_number", "certificate_rate", "certificate_valid_from", "certificate_valid_to", "financial_year", "tax_year", "quarter"]
 DEDUCTEE_MASTER_SCHEMA = ["deductee_id", "vendor_code", "legal_name", "pan", "gstin", "deductee_type", "address", "pan_status", "pan_verified_at", "lower_deduction_certificate", "certificate_number", "certificate_rate", "certificate_valid_from", "certificate_valid_to"]
 
 
@@ -325,7 +326,41 @@ PAYMENT_NATURES = {
     "technical services": "technical_service", "rent_machinery": "rent_machinery",
     "rent_building": "rent_building", "commission": "commission", "brokerage": "brokerage",
     "purchase_of_goods": "purchase_of_goods", "interest": "interest", "other_specified_payment": "other_specified_payment",
+    "salary": "salary", "provident_fund": "provident_fund", "insurance_commission": "insurance_commission",
+    "commission_brokerage": "commission_brokerage", "rent": "rent", "immovable_property": "immovable_property",
+    "jda": "jda", "compulsory_acquisition": "compulsory_acquisition", "mutual_fund_units": "mutual_fund_units",
+    "business_trust": "business_trust", "investment_fund": "investment_fund", "securitisation_trust": "securitisation_trust",
+    "interest_securities": "interest_securities", "interest_other": "interest_other", "professional_service": "professional_service",
+    "technical_service": "technical_service", "director_remuneration": "director_remuneration", "royalty": "royalty",
+    "dividend": "dividend", "life_insurance": "life_insurance", "senior_citizen": "senior_citizen",
+    "benefit_perquisite": "benefit_perquisite", "ecommerce": "ecommerce", "virtual_digital_asset": "virtual_digital_asset",
+    "lottery": "lottery", "online_game": "online_game", "horse_race": "horse_race",
+    "lottery_commission": "lottery_commission", "cash_withdrawal": "cash_withdrawal",
+    "national_savings_scheme": "national_savings_scheme", "partner_remuneration_interest": "partner_remuneration_interest",
+    "non_resident_interest": "non_resident_interest", "non_resident_capital_gain": "non_resident_capital_gain",
+    "non_resident_other_income": "non_resident_other_income", "foreign_sports_person": "foreign_sports_person",
 }
+
+RECIPIENT_RESIDENCIES = {"RESIDENT", "NON_RESIDENT", "FOREIGN_COMPANY"}
+RECIPIENT_CATEGORIES = {"PERSON", "INDIVIDUAL", "HUF", "INDIVIDUAL_HUF", "DOMESTIC_COMPANY", "COMPANY", "SENIOR_CITIZEN", "COOPERATIVE_SOCIETY", "NON_RESIDENT_COOPERATIVE_SOCIETY", "PARTNER", "UNITHOLDER", "SPECIFIED_PERSON", "ANY_NON_RESIDENT", "FOREIGN_COMPANY"}
+PAYER_CATEGORIES = {"ANY_PAYER", "DESIGNATED_PERSON", "QUALIFYING_INDIVIDUAL_HUF", "BANK_COOPERATIVE_BANK_POST_OFFICE", "COMPANY", "FIRM", "ECOMMERCE_OPERATOR", "BUSINESS_TRUST", "INVESTMENT_FUND", "SECURITISATION_TRUST", "GOVERNMENT_OR_INDIAN_CONCERN"}
+
+
+def controlled_recipient_residency(transaction: dict) -> str | None:
+    """Return a supplied controlled residency value, never infer it from PAN.
+
+    The legacy contractor control is retained as a narrow evidence-backed
+    compatibility bridge.  Generic rows require the new controlled input.
+    """
+    value = str(transaction.get("recipient_residency") or "").strip().upper()
+    if value in RECIPIENT_RESIDENCIES:
+        return value
+    contractor = str(transaction.get("contractor_residency_status") or "").upper()
+    if contractor == "CONFIRMED_RESIDENT":
+        return "RESIDENT"
+    if contractor == "CONFIRMED_NON_RESIDENT":
+        return "NON_RESIDENT"
+    return None
 
 
 def classify_payment_nature(transaction: dict) -> dict:
@@ -365,11 +400,19 @@ def select_statutory_rule(transaction: dict, rules: list[dict], law: dict, natur
     if law.get("status") != "LAW_DETERMINED":
         return None, "LAW_NOT_DETERMINABLE"
     event, section = law["effective_event_date"], str(transaction.get("section_input") or "").strip().upper()
-    candidates, section_conflict = [], False
+    candidates, section_conflict, residency_scope_candidates = [], False, []
+    classification_fact_required = False
+    residency = controlled_recipient_residency(transaction)
     for rule in rules:
+        # Interest and due-date policies share the governed rules collection,
+        # but are never statutory withholding rules.  Letting either policy
+        # type enter this selector can make an otherwise single statutory
+        # match ambiguous.
+        if rule.get("interest_type") or rule.get("policy_kind"):
+            continue
         if not _rule_scope_matches(transaction, rule):
             continue
-        if not rule.get("active", True) or rule.get("lifecycle") not in {"APPROVED", "ACTIVE"}:
+        if not rule.get("active", True) or rule.get("lifecycle") != "ACTIVE":
             continue
         if (rule.get("governing_act") or rule.get("act")) != law["act"]:
             continue
@@ -384,11 +427,41 @@ def select_statutory_rule(transaction: dict, rules: list[dict], law: dict, natur
             continue
         if rule.get("deductee_type") and rule.get("deductee_type") != transaction.get("deductee_type"):
             continue
+        residency_scope_candidates.append(rule)
+        # New generalized catalog rows must have controlled residency and
+        # party-category evidence.  Legacy contractor records intentionally
+        # remain under their dedicated contractor evidence contract.
+        if rule.get("generalized_selection_required") and rule.get("recipient_residency"):
+            if not residency or rule.get("recipient_residency") != residency:
+                continue
+        if rule.get("generalized_selection_required") and rule.get("recipient_category") and rule.get("recipient_category") != transaction.get("recipient_category"):
+            continue
+        if rule.get("generalized_selection_required") and rule.get("payer_category") and rule.get("payer_category") != transaction.get("payer_category"):
+            continue
+        requirements = rule.get("required_classification_facts") or []
+        if requirements:
+            facts = transaction.get("classification_facts") or []
+            def fact_is_verified(requirement):
+                return any(
+                    fact.get("fact_type") == requirement.get("fact_type")
+                    and fact.get("value_code") == requirement.get("value_code")
+                    and fact.get("source_condition_reference") == requirement.get("source_condition_reference")
+                    and fact.get("evidence_status") == "VERIFIED"
+                    and fact.get("evidence_reference")
+                    for fact in facts
+                )
+            if not all(fact_is_verified(requirement) for requirement in requirements):
+                classification_fact_required = True
+                continue
         if section and rule.get("section_reference") and section != str(rule["section_reference"]).upper() and section != str(rule.get("historical_section_reference") or "").upper():
             section_conflict = True
             continue
         candidates.append(rule)
     if not candidates:
+        if not residency and any(item.get("generalized_selection_required") and item.get("recipient_residency") for item in residency_scope_candidates):
+            return None, "RECIPIENT_RESIDENCY_REQUIRED"
+        if classification_fact_required:
+            return None, "CLASSIFICATION_FACT_REQUIRED"
         return None, "SECTION_CONFLICT" if section_conflict else "RULE_NOT_FOUND"
     # Only an explicit configured priority can resolve overlapping rules. A
     # rule version is evidence, not an implicit precedence policy.
@@ -426,6 +499,191 @@ def determine_applicable_tds_rate(transaction: dict, rule: dict | None, event_da
     return {"status": "RATE_DETERMINED", "rate": rate, "rate_source": "CONFIGURED_RULE", "rate_reason": "Rate is from the configured, versioned statutory rule.", "pan_adjustment": None, "certificate_adjustment": None}
 
 
+# Contractor controls are intentionally opt-in until a CA records a bounded
+# product scope.  They turn supplied evidence into an auditable decision; they
+# never derive a payer class, exception, PAN status, or deadline from labels.
+CONTRACTOR_CONTROL_CONTRACT = "CONTRACTOR_WITHHOLDING_V1"
+PAYER_ELIGIBILITY_STATUSES = {"CONFIRMED_ELIGIBLE", "CONFIRMED_INELIGIBLE", "INSUFFICIENT_EVIDENCE"}
+CONTRACTOR_EXCEPTION_STATUSES = {"NO_EXCEPTION_CONFIRMED", "EXCEPTION_CONFIRMED", "NOT_ASSESSED", "INSUFFICIENT_EVIDENCE"}
+CONTRACTOR_EXCEPTION_TYPES = {"PERSONAL_PURPOSE_INDIVIDUAL_HUF", "GOODS_CARRIAGE"}
+CONTRACTOR_RESIDENCY_STATUSES = {"CONFIRMED_RESIDENT", "CONFIRMED_NON_RESIDENT", "INSUFFICIENT_EVIDENCE"}
+CONTRACTOR_INVOICE_MATERIAL_STATUSES = {
+    "NO_CUSTOMER_SUPPLIED_MATERIAL_CONFIRMED",
+    "CUSTOMER_SUPPLIED_MATERIAL_NOT_SEPARATELY_STATED",
+    "CUSTOMER_SUPPLIED_MATERIAL_SEPARATELY_STATED",
+    "INSUFFICIENT_EVIDENCE",
+}
+PAN_OPERATIONAL_STATUSES = {"VERIFIED", "NOT_VERIFIED", "UNKNOWN", "UNAVAILABLE"}
+DEDUCTOR_TYPES = {"GOVERNMENT_OFFICE", "OTHER_DEDUCTOR"}
+CHALLAN_ROUTES = {"WITH_CHALLAN", "WITHOUT_CHALLAN"}
+
+
+def _is_contractor_rule(rule: dict) -> bool:
+    reference = str(rule.get("section_reference") or rule.get("provision_reference") or "").upper()
+    return str(rule.get("payment_nature") or "").lower() == "contractor" and ("194C" in reference or "393" in reference or not reference)
+
+
+def assess_contractor_applicability(transaction: dict, rule: dict) -> dict:
+    """Assess only supplied contractor evidence under the review contract.
+
+    This does not approve a legal scope.  It distinguishes ineligibility,
+    established source-supported exceptions, and unavailable evidence so a
+    caller can freeze the decision with the calculation snapshot.
+    """
+    if not _is_contractor_rule(rule):
+        return {"status": "NOT_APPLICABLE", "reason_code": None, "evidence": {}}
+    payer_status = str(transaction.get("payer_eligibility_status") or "INSUFFICIENT_EVIDENCE").upper()
+    payer_evidence = str(transaction.get("payer_eligibility_evidence_reference") or "").strip()
+    residency_status = str(transaction.get("contractor_residency_status") or "INSUFFICIENT_EVIDENCE").upper()
+    residency_evidence = str(transaction.get("contractor_residency_evidence_reference") or "").strip()
+    exception_status = str(transaction.get("contractor_exception_status") or "NOT_ASSESSED").upper()
+    exception_type = str(transaction.get("contractor_exception_type") or "").upper()
+    exception_evidence = str(transaction.get("contractor_exception_evidence_reference") or "").strip()
+    evidence = {
+        "payer_eligibility_status": payer_status, "payer_eligibility_evidence_reference": payer_evidence or None,
+        "contractor_residency_status": residency_status, "contractor_residency_evidence_reference": residency_evidence or None,
+        "contractor_exception_status": exception_status, "contractor_exception_type": exception_type or None,
+        "contractor_exception_evidence_reference": exception_evidence or None,
+        "contractor_personal_purpose_attestation": transaction.get("contractor_personal_purpose_attestation"),
+        "contractor_personal_purpose_payer_type": transaction.get("contractor_personal_purpose_payer_type"),
+        "contractor_personal_purpose_payer_type_evidence_reference": transaction.get("contractor_personal_purpose_payer_type_evidence_reference"),
+        "goods_carriage_count": transaction.get("goods_carriage_count"),
+        "goods_carriage_business_evidence_reference": transaction.get("goods_carriage_business_evidence_reference"),
+        "goods_carriage_declaration_reference": transaction.get("goods_carriage_declaration_reference"),
+        "goods_carriage_pan_reference": transaction.get("goods_carriage_pan_reference"),
+        "goods_carriage_particulars_reference": transaction.get("goods_carriage_particulars_reference"),
+        "contractor_invoice_material_status": str(transaction.get("contractor_invoice_material_status") or "INSUFFICIENT_EVIDENCE").upper(),
+        "contractor_invoice_material_evidence_reference": transaction.get("contractor_invoice_material_evidence_reference"),
+    }
+    if residency_status not in CONTRACTOR_RESIDENCY_STATUSES or not residency_evidence:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_RESIDENCY_EVIDENCE_REQUIRED", "reason": "Resident-recipient status is not evidenced for this resident-contractor rule.", "evidence": evidence}
+    if residency_status == "CONFIRMED_NON_RESIDENT":
+        return {"status": "NOT_APPLICABLE", "reason_code": "CONTRACTOR_RECIPIENT_CONFIRMED_NON_RESIDENT", "reason": "This resident-contractor rule does not apply where controlled evidence confirms a non-resident recipient.", "evidence": evidence}
+    if residency_status != "CONFIRMED_RESIDENT":
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_RESIDENCY_UNRESOLVED", "reason": "Resident-recipient status is not confirmed; this contractor rule cannot be selected by inference.", "evidence": evidence}
+    if payer_status not in PAYER_ELIGIBILITY_STATUSES or not payer_evidence:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "PAYER_ELIGIBILITY_EVIDENCE_REQUIRED", "reason": "Contractor payer eligibility is not evidenced by the controlled review contract.", "evidence": evidence}
+    if payer_status == "CONFIRMED_INELIGIBLE":
+        if exception_status == "EXCEPTION_CONFIRMED" or exception_type:
+            return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_EVIDENCE_CONTRADICTORY", "reason": "Payer ineligibility conflicts with an asserted contractor exception.", "evidence": evidence}
+        return {"status": "NOT_APPLICABLE", "reason_code": "PAYER_CONFIRMED_INELIGIBLE", "reason": "Controlled payer evidence states this contractor rule does not apply.", "evidence": evidence}
+    if payer_status != "CONFIRMED_ELIGIBLE":
+        return {"status": "REVIEW_REQUIRED", "reason_code": "PAYER_ELIGIBILITY_UNRESOLVED", "reason": "Payer eligibility is not confirmed; contractor classification alone is insufficient.", "evidence": evidence}
+    if exception_status not in CONTRACTOR_EXCEPTION_STATUSES:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_EXCEPTION_STATUS_INVALID", "reason": "Contractor exception status is not recognised by the controlled review contract.", "evidence": evidence}
+    if exception_status == "EXCEPTION_CONFIRMED":
+        if exception_type not in CONTRACTOR_EXCEPTION_TYPES or not exception_evidence:
+            return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_EXCEPTION_EVIDENCE_REQUIRED", "reason": "An asserted contractor exception lacks a supported type or evidence reference.", "evidence": evidence}
+        if exception_type == "PERSONAL_PURPOSE_INDIVIDUAL_HUF" and (
+            evidence["contractor_personal_purpose_attestation"] is not True
+            or evidence["contractor_personal_purpose_payer_type"] != "INDIVIDUAL_HUF"
+            or not evidence["contractor_personal_purpose_payer_type_evidence_reference"]
+        ):
+            return {"status": "REVIEW_REQUIRED", "reason_code": "PERSONAL_PURPOSE_EVIDENCE_REQUIRED", "reason": "Personal-purpose exception requires an individual/HUF payer, an explicit attestation, and evidence references.", "evidence": evidence}
+        if exception_type == "GOODS_CARRIAGE":
+            count = evidence["goods_carriage_count"]
+            if not isinstance(count, int) or count < 0 or count > 10 or not all(evidence[key] for key in ("goods_carriage_business_evidence_reference", "goods_carriage_declaration_reference", "goods_carriage_pan_reference", "goods_carriage_particulars_reference")):
+                return {"status": "REVIEW_REQUIRED", "reason_code": "GOODS_CARRIAGE_EVIDENCE_REQUIRED", "reason": "Goods-carriage exception requires business, count, declaration, PAN and prescribed-particulars evidence.", "evidence": evidence}
+        return {"status": "NOT_APPLICABLE", "reason_code": f"CONTRACTOR_EXCEPTION_{exception_type}", "reason": "A controlled review established a source-supported contractor exception.", "evidence": evidence}
+    if exception_status == "NO_EXCEPTION_CONFIRMED" and (exception_type or any(evidence[key] not in (None, "") for key in ("contractor_personal_purpose_attestation", "contractor_personal_purpose_payer_type", "contractor_personal_purpose_payer_type_evidence_reference", "goods_carriage_count", "goods_carriage_business_evidence_reference", "goods_carriage_declaration_reference", "goods_carriage_pan_reference", "goods_carriage_particulars_reference"))):
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_EVIDENCE_CONTRADICTORY", "reason": "No-exception assessment conflicts with asserted exception evidence.", "evidence": evidence}
+    if exception_status != "NO_EXCEPTION_CONFIRMED" or not exception_evidence:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_EXCEPTION_NOT_ASSESSED", "reason": "No-exception treatment requires an explicit assessment and evidence reference.", "evidence": evidence}
+    material_status = evidence["contractor_invoice_material_status"]
+    material_evidence = evidence["contractor_invoice_material_evidence_reference"]
+    if material_status not in CONTRACTOR_INVOICE_MATERIAL_STATUSES or not material_evidence:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_INVOICE_MATERIAL_EVIDENCE_REQUIRED", "reason": "Invoice-material treatment is not evidenced for the contractor calculation base.", "evidence": evidence}
+    if material_status == "CUSTOMER_SUPPLIED_MATERIAL_SEPARATELY_STATED":
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_MATERIAL_BASE_REVIEW_REQUIRED", "reason": "The invoice separately states customer-supplied material, but the current governed rule has no approved material-allocation input.", "evidence": evidence}
+    if material_status == "INSUFFICIENT_EVIDENCE":
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_INVOICE_MATERIAL_UNRESOLVED", "reason": "Invoice-material treatment is not confirmed; the full invoice amount cannot be assumed safely.", "evidence": evidence}
+    return {"status": "APPLICABLE", "reason_code": "CONTRACTOR_APPLICABILITY_CONFIRMED", "reason": "Payer eligibility and no-exception assessment are explicitly evidenced.", "evidence": evidence}
+
+
+def pan_evidence_assessment(transaction: dict) -> dict:
+    """Keep PAN syntax and operational evidence separate; no external lookup."""
+    syntax = transaction.get("pan_status") or pan_status(transaction.get("deductee_pan"))
+    operational = str(transaction.get("pan_operational_status") or "UNKNOWN").upper()
+    reference = str(transaction.get("pan_evidence_reference") or "").strip()
+    if operational not in PAN_OPERATIONAL_STATUSES:
+        operational = "UNKNOWN"
+    if operational == "VERIFIED" and not reference:
+        operational = "UNKNOWN"
+    return {"pan_syntax_status": syntax, "pan_operational_status": operational, "pan_evidence_reference": reference or None,
+            "status": "EVIDENCE_BACKED" if operational == "VERIFIED" else "EVIDENCE_UNAVAILABLE" if operational == "UNAVAILABLE" else "NOT_VERIFIED"}
+
+
+def determine_configured_contractor_deposit_deadline(transaction: dict, policies: list[dict]) -> dict:
+    """Select an explicitly approved Rule 30/218 policy and calculate no default.
+
+    Policies provide the branch/method values.  This function deliberately has
+    no embedded statutory date values and returns review-required when scope,
+    evidence, configuration, or policy selection is incomplete or ambiguous.
+    """
+    deduction = _day(transaction.get("deduction_date"))
+    law = transaction.get("governing_act")
+    financial_year = transaction.get("financial_year")
+    section_reference = str(transaction.get("section_reference") or "").strip()
+    deductor_type = str(transaction.get("deductor_type") or "").upper()
+    challan_route = str(transaction.get("challan_route") or "").upper()
+    if not deduction:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "DEDUCTION_DATE_REQUIRED", "deposit_due_date": None}
+    if deductor_type not in DEDUCTOR_TYPES:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "DEDUCTOR_TYPE_REQUIRED", "deposit_due_date": None}
+    if deductor_type == "GOVERNMENT_OFFICE" and challan_route not in CHALLAN_ROUTES:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "CHALLAN_ROUTE_REQUIRED", "deposit_due_date": None}
+    deductee_type = transaction.get("deductee_type")
+    def governed(policy: dict) -> bool:
+        if policy.get("policy_kind") == "CONTRACTOR_DEPOSIT_DUE_DATE":
+            return (
+                policy.get("active") is True
+                and policy.get("lifecycle") == "ACTIVE"
+                and policy.get("source_traceability_status") == "VERIFIED"
+                and bool(policy.get("approved_at"))
+                and bool(policy.get("approved_by"))
+                and bool(policy.get("rule_id"))
+            )
+        # Compatibility for the pre-existing isolated configuration contract.
+        return policy.get("active") and policy.get("lifecycle") == "ACTIVE" and policy.get("approved_configuration") is True and policy.get("source_verified") is True and bool(policy.get("configuration_id"))
+    candidates = [p for p in policies if governed(p)
+                  and p.get("governing_act") == law and p.get("financial_year") == financial_year and p.get("payment_nature") == "contractor"
+                  and (not p.get("deductee_type") or p.get("deductee_type") == deductee_type)
+                  and (not section_reference or p.get("section_reference") == section_reference)
+                  and p.get("deductor_type") == deductor_type and (p.get("challan_route") or None) == (challan_route or None)
+                  and str(p.get("effective_from") or "0000-01-01") <= deduction.isoformat() <= str(p.get("effective_to") or "9999-12-31")]
+    if len(candidates) != 1:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "DUE_DATE_POLICY_NOT_CONFIGURED" if not candidates else "DUE_DATE_POLICY_AMBIGUOUS", "deposit_due_date": None}
+    policy = candidates[0]
+    mode = str(policy.get("deadline_mode") or "").upper()
+    from datetime import timedelta
+    if mode == "DEDUCTION_DATE":
+        due = deduction
+    elif mode == "MONTH_END_PLUS_DAYS":
+        days = policy.get("days_after_month_end")
+        if not isinstance(days, int) or days < 0:
+            return {"status": "REVIEW_REQUIRED", "reason_code": "DUE_DATE_POLICY_INVALID", "deposit_due_date": None}
+        next_month = deduction.replace(day=28) + timedelta(days=4)
+        due = next_month - timedelta(days=next_month.day) + timedelta(days=days)
+    elif mode == "FIXED_MONTH_DAY":
+        month, day = policy.get("deadline_month"), policy.get("deadline_day")
+        if not isinstance(month, int) or not isinstance(day, int):
+            return {"status": "REVIEW_REQUIRED", "reason_code": "DUE_DATE_POLICY_INVALID", "deposit_due_date": None}
+        try:
+            year = deduction.year + (1 if month < deduction.month else 0)
+            due = date(year, month, day)
+        except ValueError:
+            return {"status": "REVIEW_REQUIRED", "reason_code": "DUE_DATE_POLICY_INVALID", "deposit_due_date": None}
+    else:
+        return {"status": "REVIEW_REQUIRED", "reason_code": "DUE_DATE_POLICY_INVALID", "deposit_due_date": None}
+    snapshot = deepcopy({key: value for key, value in policy.items() if key != "_id"})
+    snapshot.setdefault("configuration_id", policy.get("rule_id"))
+    snapshot.setdefault("policy_id", policy.get("rule_id"))
+    snapshot.setdefault("policy_version", policy.get("rule_version"))
+    return {"status": "DETERMINED", "reason_code": "CONFIGURED_DUE_DATE", "deposit_due_date": due.isoformat(),
+            "policy_snapshot": snapshot,
+            "branch_inputs": {"deduction_date": deduction.isoformat(), "deductor_type": deductor_type, "challan_route": challan_route or None, "governing_act": law, "financial_year": financial_year, "section_reference": section_reference or None}}
+
+
 def _threshold_details(rule: dict, current: Decimal, prior: Decimal) -> dict:
     # A controlled statutory rule may require both a per-payment and an
     # aggregate-FY test.  This is additive to the legacy single-threshold
@@ -436,7 +694,13 @@ def _threshold_details(rule: dict, current: Decimal, prior: Decimal) -> dict:
         cumulative = prior + current
         per_triggered = per_payment is not None and current > per_payment
         aggregate_triggered = aggregate_fy is not None and cumulative > aggregate_fy
-        subject = current if per_triggered or aggregate_triggered else Decimal("0")
+        aggregate_excess = str(rule.get("threshold_type") or "").upper() == "AGGREGATE_EXCESS"
+        if aggregate_triggered and aggregate_excess:
+            # Some provisions expressly apply only to the amount exceeding the
+            # annual threshold.  This is source-configured, never inferred.
+            subject = cumulative - max(prior, aggregate_fy)
+        else:
+            subject = current if per_triggered or aggregate_triggered else Decimal("0")
         if per_triggered and aggregate_triggered:
             status = "PER_TRANSACTION_AND_AGGREGATE_THRESHOLD_MET"
         elif per_triggered:
@@ -483,7 +747,7 @@ def calculate_ledger_transactions(transactions: list[dict], rules: list[dict], *
         # The base is selected only after the rule is known. Keep zero as an
         # explicit source value; it must never fall through to gross amount.
         base = supplied_taxable if supplied_taxable is not None else supplied_amount
-        result = {"transaction_id": transaction.get("transaction_id"), "assignment_id": assignment_id or transaction.get("assignment_id"), "source_reference": transaction.get("source_reference"), "deductee_name": transaction.get("deductee_name"), "deductee_pan": transaction.get("deductee_pan"), "pan_status": transaction.get("pan_status") or pan_status(transaction.get("deductee_pan")), **nature, "governing_act": law.get("act"), "effective_event_date": law.get("effective_event_date"), "current_amount": float(base) if base is not None else None, "calculated_at": None}
+        result = {"transaction_id": transaction.get("transaction_id"), "assignment_id": assignment_id or transaction.get("assignment_id"), "source_reference": transaction.get("source_reference"), "deductee_name": transaction.get("deductee_name"), "deductee_pan": transaction.get("deductee_pan"), "pan_status": transaction.get("pan_status") or pan_status(transaction.get("deductee_pan")), **nature, "financial_year": transaction.get("financial_year"), "deductee_type": transaction.get("deductee_type"), "recipient_residency": transaction.get("recipient_residency"), "recipient_category": transaction.get("recipient_category"), "payer_category": transaction.get("payer_category"), "classification_facts": deepcopy(transaction.get("classification_facts") or []), "governing_act": law.get("act"), "effective_event_date": law.get("effective_event_date"), "current_amount": float(base) if base is not None else None, "calculated_at": None}
         if law["status"] != "LAW_DETERMINED":
             result.update({"calculation_status": "LAW_NOT_DETERMINABLE", "deduction_status": "NOT_DETERMINABLE", "compliance_status": "LAW_EXCEPTION", "reason_code": "LAW_NOT_DETERMINABLE", "reason": law["reason"], "recommended_action": "Provide a valid credit date or payment date.", "expected_tds": None, "tds_deduction_difference": None})
             results.append(result); continue
@@ -496,12 +760,39 @@ def calculate_ledger_transactions(transactions: list[dict], rules: list[dict], *
         rule, section_status = select_statutory_rule(transaction, rules, law, nature)
         result["section_status"] = section_status
         if not rule:
-            reason = "Section input conflicts with configured rule context." if section_status == "SECTION_CONFLICT" else "No active, approved configured rule matched this transaction."
-            result.update({"calculation_status": "REVIEW_REQUIRED" if section_status == "SECTION_CONFLICT" else "RULE_NOT_FOUND", "deduction_status": "NOT_DETERMINABLE", "compliance_status": "REVIEW_REQUIRED", "reason_code": section_status, "reason": reason, "recommended_action": "Review source classification and configure an authoritative rule; no rate was invented.", "expected_tds": None, "tds_deduction_difference": None})
+            review = section_status in {"SECTION_CONFLICT", "RECIPIENT_RESIDENCY_REQUIRED", "CLASSIFICATION_FACT_REQUIRED"}
+            reason = ("Section input conflicts with configured rule context." if section_status == "SECTION_CONFLICT"
+                      else "Recipient residency evidence is required before selecting a statutory rule." if section_status == "RECIPIENT_RESIDENCY_REQUIRED"
+                      else "Verified source-backed classification evidence is required before selecting this statutory rule." if section_status == "CLASSIFICATION_FACT_REQUIRED"
+                      else "No active, approved configured rule matched this transaction.")
+            result.update({"calculation_status": "REVIEW_REQUIRED" if review else "RULE_NOT_FOUND", "deduction_status": "NOT_DETERMINABLE", "compliance_status": "REVIEW_REQUIRED", "reason_code": section_status, "reason": reason, "recommended_action": "Review source classification and configure an authoritative rule; no rate was invented.", "expected_tds": None, "tds_deduction_difference": None})
             results.append(result); continue
         result.update({"rule_id": rule.get("rule_id"), "rule_version": rule.get("rule_version"), "rule_status": rule.get("lifecycle"), "section_reference": rule.get("section_reference"), "table_reference": rule.get("table_reference")})
         # Persist complete rule context with the result, not merely a live ID.
         result["rule_snapshot"] = deepcopy({key: value for key, value in rule.items() if key != "_id"})
+        result["pan_evidence"] = pan_evidence_assessment(transaction)
+        control_value = transaction.get("contractor_control_contract")
+        control_fields = ("payer_eligibility_status", "payer_eligibility_evidence_reference", "contractor_residency_status", "contractor_residency_evidence_reference", "contractor_exception_status", "contractor_exception_type", "contractor_exception_evidence_reference", "contractor_personal_purpose_attestation", "contractor_personal_purpose_payer_type", "contractor_personal_purpose_payer_type_evidence_reference", "goods_carriage_count", "goods_carriage_business_evidence_reference", "goods_carriage_declaration_reference", "goods_carriage_pan_reference", "goods_carriage_particulars_reference", "contractor_invoice_material_status", "contractor_invoice_material_evidence_reference", "pan_operational_status", "pan_evidence_reference", "deductor_type", "challan_route")
+        control_supplied = control_value not in (None, "") or any(transaction.get(key) is not None for key in control_fields)
+        if control_supplied:
+            result["contractor_due_date_context"] = {
+                "deduction_date": transaction.get("deduction_date"),
+                "deductor_type": transaction.get("deductor_type"),
+                "challan_route": transaction.get("challan_route"),
+                "governing_act": law.get("act"),
+                "financial_year": transaction.get("financial_year"),
+                "section_reference": rule.get("section_reference"),
+                "payment_nature": nature.get("payment_nature"),
+                "deductee_type": transaction.get("deductee_type"),
+            }
+            applicability = ({"status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_CONTROL_CONTRACT_INVALID", "reason": "Controlled contractor evidence requires the exact supported control contract.", "evidence": {}} if control_value != CONTRACTOR_CONTROL_CONTRACT else assess_contractor_applicability(transaction, rule))
+            result["contractor_applicability"] = applicability
+            if applicability["status"] == "NOT_APPLICABLE":
+                result.update({"calculation_status": "NOT_APPLICABLE", "deduction_status": "NOT_APPLICABLE", "compliance_status": "RULE_EXCEPTION", "reason_code": applicability["reason_code"], "reason": applicability["reason"], "recommended_action": "Retain the controlled evidence in the review/audit record.", "expected_tds": 0.0, "tds_deduction_difference": None})
+                results.append(result); continue
+            if applicability["status"] != "APPLICABLE":
+                result.update({"calculation_status": "REVIEW_REQUIRED", "deduction_status": "NOT_DETERMINABLE", "compliance_status": "REVIEW_REQUIRED", "reason_code": applicability["reason_code"], "reason": applicability["reason"], "recommended_action": "Complete controlled payer and exception evidence; no contractor liability was assumed.", "expected_tds": None, "tds_deduction_difference": None})
+                results.append(result); continue
         if law["act"] == "INCOME_TAX_ACT_2025" and not str(rule.get("section_reference") or "").startswith("393"):
             result.update({"calculation_status": "REVIEW_REQUIRED", "deduction_status": "NOT_DETERMINABLE", "compliance_status": "REVIEW_REQUIRED", "reason_code": "NEW_ACT_REFERENCE_REQUIRED", "reason": "A post-1-Apr-2026 rule must use a section 393 table/serial reference.", "recommended_action": "Configure the authoritative Income-tax Act, 2025 rule reference.", "expected_tds": None, "tds_deduction_difference": None})
             results.append(result); continue
@@ -682,13 +973,13 @@ def validate_deposit_evidence(filename: str, content: bytes, assignment: dict | 
 
 def select_phase5_policy(policies: list[dict], *, financial_year: str | None, event_date: str | None = None) -> tuple[dict | None, str | None]:
     """Select only one approved policy; equal priority is intentionally unsafe."""
-    candidates = [p for p in policies if p.get("active", True) and p.get("status", "APPROVED") in {"APPROVED", "ACTIVE"} and (not p.get("financial_years") or financial_year in p.get("financial_years", [])) and (not event_date or str(p.get("effective_from", "0000-01-01")) <= event_date <= str(p.get("effective_to", "9999-12-31")))]
+    candidates = [p for p in policies if p.get("active") is True and p.get("status") in {"APPROVED", "ACTIVE"} and (not p.get("financial_years") or financial_year in p.get("financial_years", [])) and (not event_date or str(p.get("effective_from", "0000-01-01")) <= event_date <= str(p.get("effective_to", "9999-12-31")))]
     if not candidates: return None, "PHASE5_POLICY_NOT_FOUND"
     priority = max(int(p.get("priority", 0)) for p in candidates); winners = [p for p in candidates if int(p.get("priority", 0)) == priority]
     return (deepcopy(winners[0]), None) if len(winners) == 1 else (None, "PHASE5_POLICY_AMBIGUOUS")
 
 
-def calculate_deposit_compliance(phase3_results: list[dict], evidence_rows: list[dict], phase4_results: list[dict] | None = None, *, assignment_id: str, calculation_id: str, evidence_version_id: str | None = None, policies: list[dict] | None = None, relationships: list[dict] | None = None) -> list[dict]:
+def calculate_deposit_compliance(phase3_results: list[dict], evidence_rows: list[dict], phase4_results: list[dict] | None = None, *, assignment_id: str, calculation_id: str, evidence_version_id: str | None = None, policies: list[dict] | None = None, due_date_policies: list[dict] | None = None, relationships: list[dict] | None = None) -> list[dict]:
     """Match only explicit references inside one assignment/FY; no name/amount-only matching."""
     phase4_by_tx = {r.get("transaction_id"): r for r in (phase4_results or [])}
     by_reference: dict[str, list[dict]] = {}
@@ -700,6 +991,25 @@ def calculate_deposit_compliance(phase3_results: list[dict], evidence_rows: list
         tx, expected = liability.get("transaction_id"), _decimal(liability.get("expected_tds"))
         policy, policy_error = select_phase5_policy(policies or [], financial_year=liability.get("financial_year"), event_date=liability.get("effective_event_date")) if policies is not None else ({"policy_id": "LEGACY_EXACT_REFERENCE", "policy_version": "1", "authoritative_identifier_types": ["EXACT_TRANSACTION_REFERENCE"], "permitted_relationship_types": ["ONE_TO_ONE", "ONE_TO_MANY"], "allocation_policy": "EXACT_REFERENCE_ONLY", "ambiguity_policy": "REVIEW_REQUIRED"}, None)
         base = {"assignment_id": assignment_id, "calculation_id": calculation_id, "evidence_version_id": evidence_version_id, "transaction_id": tx, "calculation_status": liability.get("calculation_status"), "governing_law": liability.get("governing_act"), "payment_nature": liability.get("payment_nature"), "deductee_type": liability.get("deductee_type"), "deductible_date": liability.get("effective_event_date"), "actual_deduction_date": liability.get("actual_deduction_date"), "expected_tds": float(expected) if expected is not None else None, "actual_tds_deducted": liability.get("tds_deducted"), "deposited_tds": None, "deposit_difference": None, "deposit_status": "DEPOSIT_NOT_DETERMINABLE", "timeliness_status": "DUE_DATE_NOT_DETERMINABLE", "interest_status": phase4_by_tx.get(tx, {}).get("overall_status", "INTEREST_NOT_AVAILABLE"), "evidence_entries": [], "phase5_rule_snapshot": deepcopy(policy) if policy else None}
+        contractor_control = liability.get("contractor_applicability")
+        if contractor_control and contractor_control.get("status") != "APPLICABLE":
+            base.update({"overall_status": "REVIEW_REQUIRED", "reason_code": "CONTRACTOR_APPLICABILITY_NOT_ESTABLISHED", "reason": "Deposit compliance cannot bypass the controlled contractor applicability decision.", "contractor_applicability": deepcopy(contractor_control)})
+            results.append(base); continue
+        if contractor_control:
+            base["contractor_applicability"] = deepcopy(contractor_control)
+        due_date_context = liability.get("contractor_due_date_context")
+        if due_date_policies is not None and due_date_context:
+            determination = determine_configured_contractor_deposit_deadline(
+                {**due_date_context, "deduction_date": liability.get("actual_deduction_date") or due_date_context.get("deduction_date")},
+                due_date_policies,
+            )
+            base.update({
+                "contractor_due_date_status": determination["status"],
+                "contractor_due_date_reason_code": determination["reason_code"],
+                "due_date_policy_snapshot": determination.get("policy_snapshot"),
+                "due_date_policy_branch_inputs": determination.get("branch_inputs"),
+                "deposit_due_date": determination.get("deposit_due_date"),
+            })
         if policy_error:
             base.update({"relationship_status": "REVIEW_REQUIRED", "overall_status": "REVIEW_REQUIRED", "reason_code": policy_error, "reason": "Phase 5 policy selection is unresolved."}); results.append(base); continue
         if liability.get("calculation_status") != "CALCULATED" or expected is None: base.update({"overall_status": "REVIEW_REQUIRED", "reason": "Phase 3 liability is not determinable."}); results.append(base); continue
@@ -712,7 +1022,9 @@ def calculate_deposit_compliance(phase3_results: list[dict], evidence_rows: list
         if any(_decimal(e.get("tds_amount")) is None for e in matches):
             base.update({"overall_status": "NOT_DETERMINABLE", "reason": "Matched evidence does not provide an authoritative TDS amount."}); results.append(base); continue
         deposited = sum(_decimal(e.get("tds_amount")) for e in matches)
-        difference = deposited - expected; due = _day(phase4_by_tx.get(tx, {}).get("deposit_due_date")); dates = [_day(e.get("deposit_date")) for e in matches]
+        difference = deposited - expected
+        due = _day(base.get("deposit_due_date")) if due_date_policies is not None and due_date_context else _day(phase4_by_tx.get(tx, {}).get("deposit_due_date"))
+        dates = [_day(e.get("deposit_date")) for e in matches]
         relationship_id = explicit[0].get("relationship_id") if explicit else f"DEP-{assignment_id}-{tx}"
         base.update({"evidence_entries": deepcopy(matches), "deposited_tds": float(deposited), "deposit_difference": float(difference), "deposit_group_id": relationship_id, "relationship_id": relationship_id, "relationship_status": "ESTABLISHED", "liability_ids": explicit[0].get("liability_ids", [tx]) if explicit else [tx], "group_size": len(matches), "match_method": explicit[0].get("mapping_method", "EXACT_TRANSACTION_REFERENCE") if explicit else "EXACT_TRANSACTION_REFERENCE"})
         base["deposit_status"] = "DEPOSIT_MATCHED" if difference == 0 else "DEPOSIT_SHORT" if difference < 0 else "DEPOSIT_EXCESS"
@@ -779,10 +1091,17 @@ def calculate_interest_from_deposit_results(calculation_rows: list[dict], deposi
         if actual_deduction < deductible:
             result.update({"overall_status": "INVALID_DATE_ORDER", "reason": "The persisted actual deduction date precedes the deductible event.", "explanation": "Negative delay was not calculated."})
             results.append(result); continue
-        due_date, due_error = configured_deposit_due_date(actual_deduction.isoformat(), deposit_rule, deposit)
+        due_snapshot = deposit.get("due_date_policy_snapshot")
+        due_error = _frozen_due_date_snapshot_error(deposit)
+        if not due_error:
+            due_date = deposit.get("deposit_due_date")
+            result["due_date_policy_snapshot"] = deepcopy(due_snapshot)
+            result["due_date_policy_branch_inputs"] = deepcopy(deposit.get("due_date_policy_branch_inputs"))
+        else:
+            due_date = None
         result["deposit_due_date"] = due_date
         if due_error:
-            result.update({"overall_status": "POLICY_NOT_CONFIGURED", "reason": "The approved deposit-interest policy cannot derive a due date from the persisted dates.", "explanation": "A universal deadline was not assumed."})
+            result.update({"overall_status": "POLICY_NOT_CONFIGURED", "reason": "A valid frozen Phase 4 due-date policy decision is unavailable for this deposit result.", "explanation": "Phase 5 did not derive or replace the governed Rule 218 deadline."})
             results.append(result); continue
         if not actual_deposit:
             result.update({"overall_status": "DATE_NOT_DETERMINABLE", "reason": "A usable persisted deposit date is not available in the selected deposit run.", "explanation": "Missing deposit evidence was not treated as on time."})
@@ -794,7 +1113,16 @@ def calculate_interest_from_deposit_results(calculation_rows: list[dict], deposi
         # Validate the configured basis even where there is no delay, but do
         # not feed an end date before its start date into a period counter.
         deduction = _interest_component(deduction_rule, deductible, actual_deduction if actual_deduction >= deductible else deductible, interest_phase2)
-        deposit_component = _interest_component(deposit_rule, due_date, actual_deposit if actual_deposit >= _day(due_date) else due_date, interest_phase2)
+        # Section 398(3)(a)(ii) measures deposit-delay interest from the
+        # deduction/collection date through actual payment.  The governed due
+        # date remains the control that decides whether a payment is late; it
+        # is not the statutory start of the interest period.
+        deposit_component = _interest_component(
+            deposit_rule,
+            actual_deduction,
+            actual_deposit if actual_deposit >= actual_deduction else actual_deduction,
+            interest_phase2,
+        )
         if actual_deduction == deductible and deduction["determinable"]:
             deduction.update({"periods": 0, "interest": Decimal("0.00")})
         if actual_deposit <= _day(due_date) and deposit_component["determinable"]:
@@ -831,7 +1159,14 @@ def _configured_interest_rule(rules: list[dict], *, interest_type: str, law: str
     for rule in rules:
         if rule.get("interest_type") != interest_type or not rule.get("active", True) or rule.get("lifecycle") not in {"APPROVED", "ACTIVE"}:
             continue
-        if (rule.get("governing_law") or rule.get("act")) != law or not event_date:
+        # The API lifecycle rejects these records before activation.  Keep the
+        # domain selector equally fail-closed so a malformed imported/test
+        # record cannot become calculation-eligible by bypassing that route.
+        if governed_activation_errors(rule):
+            continue
+        # Rule API records use governing_act; imported historical records may
+        # use governing_law or act.  They express the same persisted scope.
+        if (rule.get("governing_law") or rule.get("governing_act") or rule.get("act")) != law or not event_date:
             continue
         if not (str(rule.get("effective_from") or "0000-01-01") <= event_date <= str(rule.get("effective_to") or "9999-12-31")):
             continue
@@ -900,6 +1235,27 @@ def configured_deposit_due_date(deduction_date: Any, rule: dict, transaction: di
     return None, "RULE_NOT_FOUND"
 
 
+def _frozen_due_date_snapshot_error(deposit: dict) -> str | None:
+    """Validate the persisted Phase 4 decision without consulting live policy."""
+    if deposit.get("contractor_due_date_status") != "DETERMINED":
+        return deposit.get("contractor_due_date_reason_code") or "DUE_DATE_POLICY_NOT_CONFIGURED"
+    if not _day(deposit.get("deposit_due_date")):
+        return "DUE_DATE_POLICY_SNAPSHOT_INVALID"
+    snapshot = deposit.get("due_date_policy_snapshot")
+    required = ("rule_id", "rule_version", "approved_at", "approved_by")
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("policy_kind") != "CONTRACTOR_DEPOSIT_DUE_DATE"
+        or snapshot.get("active") is not True
+        or snapshot.get("lifecycle") != "ACTIVE"
+        or snapshot.get("source_traceability_status") != "VERIFIED"
+        or any(not snapshot.get(field) for field in required)
+        or not isinstance(deposit.get("due_date_policy_branch_inputs"), dict)
+    ):
+        return "DUE_DATE_POLICY_SNAPSHOT_INVALID"
+    return None
+
+
 def _interest_base(rule: dict, phase3: dict) -> Decimal | None:
     basis = str(rule.get("interest_base") or "").lower()
     expected, actual = _decimal(phase3.get("expected_tds")), _decimal(phase3.get("tds_deducted"))
@@ -953,26 +1309,14 @@ def calculate_interest_compliance(phase3_results: list[dict], ledger_rows: list[
         if not deductible or actual_deduction < deductible:
             result.update({"overall_status": "INVALID_DATE_SEQUENCE", "reason": "Actual deduction date precedes the deductible event or event is invalid.", "explanation": "Negative delay was not calculated."})
             results.append(result); continue
-        due_date, due_error = configured_deposit_due_date(actual_deduction.isoformat(), deposit_rule, source)
-        result["deposit_due_date"] = due_date
-        actual_deposit = _day(source.get("deposit_date"))
-        if due_error:
-            result.update({"overall_status": "RULE_NOT_FOUND", "reason": "The configured deposit rule cannot derive a due date.", "explanation": "A universal deposit deadline was not assumed."})
-            results.append(result); continue
-        if not actual_deposit:
-            result.update({"overall_status": "DEPOSIT_DATE_NOT_PROVIDED", "reason": "Actual deposit date is not provided.", "explanation": "Missing deposit evidence was not treated as on time."})
-            results.append(result); continue
-        if actual_deposit < actual_deduction:
-            result.update({"overall_status": "INVALID_DATE_SEQUENCE", "reason": "Actual deposit precedes actual deduction.", "explanation": "Negative deposit delay was not calculated."})
-            results.append(result); continue
-        deduction = _interest_component(deduction_rule, deductible, actual_deduction, phase3)
-        deposit = _interest_component(deposit_rule, due_date, actual_deposit, phase3)
-        if not deduction["determinable"] or not deposit["determinable"]:
-            result.update({"overall_status": "INTEREST_NOT_DETERMINABLE", "reason": "Configured interest rate, base, period-counting or rounding cannot be safely applied.", "explanation": "Interest was not guessed from incomplete configuration."})
-            results.append(result); continue
-        result.update({"deduction_delay_periods": deduction["periods"], "deduction_interest_rate": float(deduction["rate"]), "deduction_interest_base": float(deduction["base"]), "deduction_interest": float(deduction["interest"]), "deposit_delay_periods": deposit["periods"], "deposit_interest_rate": float(deposit["rate"]), "deposit_interest_base": float(deposit["base"]), "deposit_interest": float(deposit["interest"]), "total_interest": float(deduction["interest"] + deposit["interest"]), "deduction_status": "DEDUCTION_DELAY" if actual_deduction > deductible else "COMPLIANT", "deposit_status": "DEPOSIT_DELAY" if actual_deposit > _day(due_date) else "COMPLIANT"})
-        result["overall_status"] = "DEDUCTION_AND_DEPOSIT_DELAY" if result["deduction_status"] == "DEDUCTION_DELAY" and result["deposit_status"] == "DEPOSIT_DELAY" else result["deduction_status"] if result["deduction_status"] != "COMPLIANT" else result["deposit_status"]
-        result["reason"] = "Interest calculated only from the configured deduction and deposit rules."
-        result["explanation"] = f"Deductible date {event}; actual deduction {actual_deduction.isoformat()}; deposit due {due_date}; actual deposit {actual_deposit.isoformat()}; total configured interest {result['total_interest']}."
+        # This predecessor preview path has no persisted Phase 4 deposit
+        # result, so it cannot prove which governed Rule 218 branch applied.
+        # The persisted /interest-compliance workflow is the sole path that
+        # consumes the immutable Phase 4 due-date-policy snapshot.
+        result.update({
+            "overall_status": "POLICY_NOT_CONFIGURED",
+            "reason": "A frozen Phase 4 due-date policy snapshot is required for deposit-delay interest.",
+            "explanation": "Use the persisted interest-compliance workflow after Phase 4 deposit compliance; no live deadline is derived from an interest policy.",
+        })
         results.append(result)
     return results
