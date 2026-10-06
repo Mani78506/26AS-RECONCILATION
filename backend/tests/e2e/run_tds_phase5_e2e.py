@@ -1,4 +1,4 @@
-﻿"""Run complete isolated TDS E2E only with supplied CA policy values."""
+"""Run complete isolated TDS E2E only with supplied CA policy values."""
 from __future__ import annotations
 import json, os, sys
 from datetime import datetime, timezone
@@ -49,8 +49,13 @@ def _verify_active_policies(server, provisioned: list[dict], supplied: dict) -> 
         fields = ("financial_year", "payment_nature", "deductee_type", "governing_act", "effective_from", "effective_to", "priority")
         mismatch = [field for field in fields if record.get(field) != source.get(field)]
         if mismatch or record.get("rule_version") != created.get("rule_version"): raise RuntimeError("E2E EXECUTION BLOCKED: activated policy verification failed: " + ", ".join(mismatch or ["rule_version"]))
+        provisional = source.get("policy_status") == "PROVISIONAL_UAT"
         metadata = record.get("approval_metadata") or {}
-        if not metadata.get("approved_source") or metadata.get("approved_source") != source.get("approval_metadata", {}).get("approved_source"): raise RuntimeError("E2E EXECUTION BLOCKED: activated policy approval metadata was not persisted.")
+        if provisional:
+            if not (record.get("policy_status") == "PROVISIONAL_UAT" and record.get("ca_approved") is False and not record.get("approved_at") and not metadata):
+                raise RuntimeError("E2E EXECUTION BLOCKED: provisional UAT policy metadata was not persisted safely.")
+        elif not metadata.get("approved_source") or metadata.get("approved_source") != source.get("approval_metadata", {}).get("approved_source"):
+            raise RuntimeError("E2E EXECUTION BLOCKED: activated policy approval metadata was not persisted.")
         verified.append({key: record.get(key) for key in ("rule_id", "rule_version", "interest_type", "lifecycle", "active", "financial_year", "payment_nature", "deductee_type", "governing_act", "effective_from", "effective_to", "priority", "approval_metadata", "approved_at", "approved_by", "activated_at", "activated_by")})
     if {item["interest_type"] for item in verified} != REQUIRED_TYPES: raise RuntimeError("E2E EXECUTION BLOCKED: activated policy types are incomplete.")
     return verified
@@ -66,8 +71,9 @@ def _provision_explicit_due_date_policy(server, supplied: dict) -> list[dict]:
     policy = policies[0]
     if not isinstance(policy, dict) or policy.get("policy_kind") != DUE_DATE_POLICY_KIND:
         raise RuntimeError("E2E EXECUTION BLOCKED: supplied due-date configuration has an unsupported policy kind.")
+    provisional = policy.get("policy_status") == "PROVISIONAL_UAT" and policy.get("environment") == "isolated_e2e_only" and policy.get("ca_approved") is False and policy.get("approval_metadata") is None
     approval = policy.get("approval_metadata")
-    if not isinstance(approval, dict) or not all(approval.get(key) for key in ("approved_source", "approval_authority", "approval_reference")):
+    if not provisional and (not isinstance(approval, dict) or not all(approval.get(key) for key in ("approved_source", "approval_authority", "approval_reference"))):
         raise RuntimeError("E2E EXECUTION BLOCKED: due-date policy approval metadata is incomplete.")
     allowed = set(server.TdsComplianceRuleBody.model_fields)
     try:
@@ -85,9 +91,17 @@ def _provision_explicit_due_date_policy(server, supplied: dict) -> list[dict]:
         raise RuntimeError(f"E2E EXECUTION BLOCKED: due-date policy scope conflicts with {conflict['rule_id']}.")
     principal = server.build_development_principal()
     created = server.create_tds_compliance_rule(body, principal)
-    created = server.submit_tds_compliance_rule(created["rule_id"], principal)
-    created = server.approve_tds_compliance_rule(created["rule_id"], principal)
-    created = server.activate_tds_compliance_rule(created["rule_id"], principal)
+    if provisional:
+        now = server.now_iso()
+        traceability = server.source_traceability_snapshot(created)
+        server.db.tds_compliance_rules.update_one({"rule_id": created["rule_id"], "lifecycle": "DRAFT"}, {"$set": {"lifecycle": "ACTIVE", "active": True, "activated_at": now, "activated_by": "PROVISIONAL_UAT_E2E_RUNNER", "updated_at": now, "updated_by": "PROVISIONAL_UAT_E2E_RUNNER", "source_traceability": traceability, "source_traceability_status": traceability["status"]}})
+        created = server._rule_or_404(created["rule_id"])
+        server._record_rule_revision(created, "PROVISIONAL_UAT_ACTIVATED", principal)
+        server._audit_tds_rule("RULE_PROVISIONAL_UAT_ACTIVATED", created, principal, old_value={"lifecycle": "DRAFT"}, new_value={"lifecycle": "ACTIVE", "policy_status": "PROVISIONAL_UAT"})
+    else:
+        created = server.submit_tds_compliance_rule(created["rule_id"], principal)
+        created = server.approve_tds_compliance_rule(created["rule_id"], principal)
+        created = server.activate_tds_compliance_rule(created["rule_id"], principal)
     if not created.get("active") or created.get("lifecycle") != "ACTIVE":
         raise RuntimeError("E2E EXECUTION BLOCKED: due-date policy did not become active.")
     return [{key: created.get(key) for key in (
@@ -113,7 +127,7 @@ def _provision_explicit_deposit_matching_policies(server, supplied: dict) -> lis
             body = server.Phase5PolicyBody(**policy)
         except Exception as exc:
             raise RuntimeError(f"E2E EXECUTION BLOCKED: deposit-matching policy shape is invalid: {exc}") from exc
-        if not body.active or body.status not in {"APPROVED", "ACTIVE"}:
+        if not body.active or body.status not in {"APPROVED", "ACTIVE", "PROVISIONAL_UAT"}:
             raise RuntimeError("E2E EXECUTION BLOCKED: deposit-matching policy must be explicitly active and approved.")
         record = server.create_phase5_policy(body.assignment_id, body, principal)
         created.append({key: record.get(key) for key in (

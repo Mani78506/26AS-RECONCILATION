@@ -237,6 +237,25 @@ def test_phase5_rejects_missing_or_malformed_phase4_due_date_snapshot():
     assert malformed["overall_status"] == "POLICY_NOT_CONFIGURED"
 
 
+def test_phase5_accepts_only_fully_marked_isolated_provisional_due_date_snapshot():
+    provisional = {
+        **DUE_SNAPSHOT,
+        "approved_at": None,
+        "approved_by": None,
+        "policy_status": "PROVISIONAL_UAT",
+        "ca_approved": False,
+        "environment": "isolated_e2e_only",
+        "assumption_status": "PROVISIONAL",
+        "source_gap": True,
+        "ca_review_required": True,
+    }
+    accepted = calculate(deposit={**DEPOSIT, "due_date_policy_snapshot": provisional})
+    rejected = calculate(deposit={**DEPOSIT, "due_date_policy_snapshot": {**provisional, "source_gap": False}})
+
+    assert accepted["overall_status"] == "NO_INTEREST_INDICATED"
+    assert rejected["overall_status"] == "POLICY_NOT_CONFIGURED"
+
+
 def test_legacy_interest_preview_cannot_bypass_the_frozen_phase4_due_date_snapshot():
     legacy = calculate_interest_compliance(
         [PHASE2],

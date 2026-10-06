@@ -34,6 +34,7 @@ export interface Relationship {
 export interface DepositResult extends Relationship {
   transaction_id: string; expected_tds: number | null; actual_tds_deducted: number | null;
   deposited_tds: number | null; deposit_difference: number | null; deposit_status: string;
+  actual_deduction_date?: string | null; deposit_due_date?: string | null;
   timeliness_status: string; interest_status: string; overall_status: string; reason?: string;
   reason_code?: string; recommended_action?: string; evidence_entries: Evidence[];
   evidence_version_id?: string | null; phase5_rule_snapshot?: Policy | null;

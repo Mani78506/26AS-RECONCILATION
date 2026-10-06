@@ -1,0 +1,30 @@
+{
+  "environment": "isolated_e2e_only",
+  "policy_status": "PROVISIONAL_UAT",
+  "ca_approved": false,
+  "approval_metadata": null,
+  "source_basis": "Income Tax Department Tax Payments FAQ; Scan_20261006_112447.pdf; existing FY2026-27 project source material",
+  "due_date_policies": [
+    {
+      "organization_id": "E2E_TDS_ORG", "scope": "CLIENT", "client_id": "E2E_DEMO_TDS_SERVICES", "financial_year": "2026-27", "effective_from": "2026-04-01", "effective_to": "2027-03-31", "governing_act": "INCOME_TAX_ACT_2025", "payment_nature": "contractor", "deductee_type": "INDIVIDUAL_HUF", "section_reference": "393(1) [Table: Sl. No. 6(i)]", "policy_kind": "CONTRACTOR_DEPOSIT_DUE_DATE", "deductor_type": "OTHER_DEDUCTOR", "deadline_mode": "MONTH_END_PLUS_DAYS", "days_after_month_end": 7,
+      "source": "Income Tax Department and existing project source material", "source_reference": "Tax Payments FAQ 7; Rule 218 general non-government route", "source_url": "https://www.incometax.gov.in/iec/foportal/help/all-topics/e-filing-services/tax-payments-faq?mobile-app=1", "source_document_title": "Income Tax Department Tax Payments FAQ", "source_provision_reference": "Income-tax Rules, 2026 Rule 218", "source_retrieved_at": "2026-10-06", "source_verified_at": "2026-10-06", "source_verification_evidence": "Verified source review identifies the general 7th-of-following-month route used by the controlled contractor fixture.",
+      "policy_status": "PROVISIONAL_UAT", "ca_approved": false, "environment": "isolated_e2e_only", "approval_metadata": null, "assumption_status": "PROVISIONAL", "source_gap": true, "ca_review_required": true
+    }
+  ],
+  "deposit_matching_policies": [
+    {"client_id":"E2E_DEMO_TDS_SERVICES","assignment_id":"E2E_GOLDEN_PATH","financial_years":["2026-27"],"effective_from":"2026-04-01","effective_to":"2027-03-31","priority":3,"active":true,"status":"PROVISIONAL_UAT","authoritative_identifier_types":["EXACT_TRANSACTION_REFERENCE"],"permitted_relationship_types":["ONE_TO_ONE","ONE_TO_MANY"],"allocation_policy":"EXACT_REFERENCE_ONLY","ambiguity_policy":"REVIEW_REQUIRED","policy_status":"PROVISIONAL_UAT","ca_approved":false,"environment":"isolated_e2e_only","assumption_status":"PROVISIONAL","source_gap":true,"ca_review_required":true},
+    {"client_id":"E2E_DEMO_TDS_SERVICES","assignment_id":"E2E_EXCEPTION_PATH","financial_years":["2026-27"],"effective_from":"2026-04-01","effective_to":"2027-03-31","priority":3,"active":true,"status":"PROVISIONAL_UAT","authoritative_identifier_types":["EXACT_TRANSACTION_REFERENCE"],"permitted_relationship_types":["ONE_TO_ONE","ONE_TO_MANY"],"allocation_policy":"EXACT_REFERENCE_ONLY","ambiguity_policy":"REVIEW_REQUIRED","policy_status":"PROVISIONAL_UAT","ca_approved":false,"environment":"isolated_e2e_only","assumption_status":"PROVISIONAL","source_gap":true,"ca_review_required":true}
+  ],
+  "policies": [
+    {
+      "organization_id": "E2E_TDS_ORG", "scope": "CLIENT", "client_id": "E2E_DEMO_TDS_SERVICES", "financial_year": "2026-27", "effective_from": "2026-04-01", "effective_to": "2027-03-31", "governing_act": "INCOME_TAX_ACT_2025", "payment_nature": "contractor", "deductee_type": "INDIVIDUAL_HUF", "interest_type": "DEDUCTION_DELAY_INTEREST", "rate": "1", "rate_unit": "PERCENT_PER_PERIOD", "interest_base": "expected_tds", "period_counting_method": "CALENDAR_MONTH_OR_PART", "rounding_method": "HALF_UP", "rounding_precision": 2, "priority": 3,
+      "source": "Income Tax Department and existing project source material", "source_reference": "Tax Payments FAQ 13; Scan_20261006_112447.pdf p.14", "source_url": "https://www.incometax.gov.in/iec/foportal/help/all-topics/e-filing-services/tax-payments-faq?mobile-app=1", "source_document_title": "Income Tax Department Tax Payments FAQ", "source_provision_reference": "Income-tax Act, 2025 section 398(3)(a)(i)", "source_retrieved_at": "2026-10-06", "source_verified_at": "2026-10-06", "source_verification_evidence": "Verified source review records 1% per month or part from deductible date to actual deduction.",
+      "policy_status": "PROVISIONAL_UAT", "ca_approved": false, "environment": "isolated_e2e_only", "approval_metadata": null, "assumption_status": "PROVISIONAL", "source_gap": true, "ca_review_required": true
+    },
+    {
+      "organization_id": "E2E_TDS_ORG", "scope": "CLIENT", "client_id": "E2E_DEMO_TDS_SERVICES", "financial_year": "2026-27", "effective_from": "2026-04-01", "effective_to": "2027-03-31", "governing_act": "INCOME_TAX_ACT_2025", "payment_nature": "contractor", "deductee_type": "INDIVIDUAL_HUF", "interest_type": "DEPOSIT_DELAY_INTEREST", "rate": "1.5", "rate_unit": "PERCENT_PER_PERIOD", "interest_base": "actual_tds", "period_counting_method": "CALENDAR_MONTH_OR_PART", "rounding_method": "HALF_UP", "rounding_precision": 2, "priority": 3,
+      "source": "Income Tax Department and existing project source material", "source_reference": "Tax Payments FAQ 13; Scan_20261006_112447.pdf p.14", "source_url": "https://www.incometax.gov.in/iec/foportal/help/all-topics/e-filing-services/tax-payments-faq?mobile-app=1", "source_document_title": "Income Tax Department Tax Payments FAQ", "source_provision_reference": "Income-tax Act, 2025 section 398(3)(a)(ii)", "source_retrieved_at": "2026-10-06", "source_verified_at": "2026-10-06", "source_verification_evidence": "Verified source review records 1.5% per month or part from actual deduction to actual payment; Phase 4 alone decides lateness.",
+      "policy_status": "PROVISIONAL_UAT", "ca_approved": false, "environment": "isolated_e2e_only", "approval_metadata": null, "assumption_status": "PROVISIONAL", "source_gap": true, "ca_review_required": true
+    }
+  ]
+}

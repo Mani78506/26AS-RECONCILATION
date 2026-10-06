@@ -639,8 +639,10 @@ def determine_configured_contractor_deposit_deadline(transaction: dict, policies
                 policy.get("active") is True
                 and policy.get("lifecycle") == "ACTIVE"
                 and policy.get("source_traceability_status") == "VERIFIED"
-                and bool(policy.get("approved_at"))
-                and bool(policy.get("approved_by"))
+                and ((bool(policy.get("approved_at")) and bool(policy.get("approved_by")))
+                     or (policy.get("policy_status") == "PROVISIONAL_UAT" and policy.get("environment") == "isolated_e2e_only"
+                         and policy.get("ca_approved") is False and policy.get("assumption_status") == "PROVISIONAL"
+                         and policy.get("source_gap") is True and policy.get("ca_review_required") is True))
                 and bool(policy.get("rule_id"))
             )
         # Compatibility for the pre-existing isolated configuration contract.
@@ -973,7 +975,7 @@ def validate_deposit_evidence(filename: str, content: bytes, assignment: dict | 
 
 def select_phase5_policy(policies: list[dict], *, financial_year: str | None, event_date: str | None = None) -> tuple[dict | None, str | None]:
     """Select only one approved policy; equal priority is intentionally unsafe."""
-    candidates = [p for p in policies if p.get("active") is True and p.get("status") in {"APPROVED", "ACTIVE"} and (not p.get("financial_years") or financial_year in p.get("financial_years", [])) and (not event_date or str(p.get("effective_from", "0000-01-01")) <= event_date <= str(p.get("effective_to", "9999-12-31")))]
+    candidates = [p for p in policies if p.get("active") is True and (p.get("status") in {"APPROVED", "ACTIVE"} or (p.get("status") == "PROVISIONAL_UAT" and p.get("policy_status") == "PROVISIONAL_UAT" and p.get("ca_approved") is False and p.get("environment") == "isolated_e2e_only")) and (not p.get("financial_years") or financial_year in p.get("financial_years", [])) and (not event_date or str(p.get("effective_from", "0000-01-01")) <= event_date <= str(p.get("effective_to", "9999-12-31")))]
     if not candidates: return None, "PHASE5_POLICY_NOT_FOUND"
     priority = max(int(p.get("priority", 0)) for p in candidates); winners = [p for p in candidates if int(p.get("priority", 0)) == priority]
     return (deepcopy(winners[0]), None) if len(winners) == 1 else (None, "PHASE5_POLICY_AMBIGUOUS")
@@ -1242,14 +1244,31 @@ def _frozen_due_date_snapshot_error(deposit: dict) -> str | None:
     if not _day(deposit.get("deposit_due_date")):
         return "DUE_DATE_POLICY_SNAPSHOT_INVALID"
     snapshot = deposit.get("due_date_policy_snapshot")
-    required = ("rule_id", "rule_version", "approved_at", "approved_by")
+    approved_snapshot = bool(snapshot.get("approved_at")) and bool(snapshot.get("approved_by")) if isinstance(snapshot, dict) else False
+    # Phase 5 consumes the immutable Phase 4 decision and never re-selects a
+    # live policy.  A controlled isolated-UAT decision is deliberately not CA
+    # approved, so accept it only when every provisional governance marker is
+    # frozen alongside the source-verified policy.  Normal snapshots still
+    # require the existing CA approval evidence.
+    provisional_uat_snapshot = (
+        isinstance(snapshot, dict)
+        and snapshot.get("policy_status") == "PROVISIONAL_UAT"
+        and snapshot.get("ca_approved") is False
+        and snapshot.get("environment") == "isolated_e2e_only"
+        and snapshot.get("assumption_status") == "PROVISIONAL"
+        and snapshot.get("source_gap") is True
+        and snapshot.get("ca_review_required") is True
+        and snapshot.get("approved_at") is None
+        and snapshot.get("approved_by") is None
+    )
     if (
         not isinstance(snapshot, dict)
         or snapshot.get("policy_kind") != "CONTRACTOR_DEPOSIT_DUE_DATE"
         or snapshot.get("active") is not True
         or snapshot.get("lifecycle") != "ACTIVE"
         or snapshot.get("source_traceability_status") != "VERIFIED"
-        or any(not snapshot.get(field) for field in required)
+        or not (bool(snapshot.get("rule_id")) and bool(snapshot.get("rule_version")))
+        or not (approved_snapshot or provisional_uat_snapshot)
         or not isinstance(deposit.get("due_date_policy_branch_inputs"), dict)
     ):
         return "DUE_DATE_POLICY_SNAPSHOT_INVALID"

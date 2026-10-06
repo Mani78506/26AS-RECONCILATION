@@ -42,6 +42,7 @@ def _configure_environment() -> None:
         "TDS_COMPLIANCE_DEV_AUTH": "true",
         "TDS_DEV_ORGANIZATION_ID": "E2E_TDS_ORG",
         "TDS_DEV_CLIENT_ID": "E2E_DEMO_TDS_SERVICES",
+        "TDS_PROVISIONAL_UAT_E2E": "true",
     })
     if str(BACKEND) not in sys.path:
         sys.path.insert(0, str(BACKEND))

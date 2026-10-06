@@ -577,6 +577,12 @@ class TdsComplianceRuleBody(BaseModel):
     source_verified_at: str | None = None
     source_verification_evidence: str | None = None
     approval_metadata: dict[str, str] | None = None
+    policy_status: str | None = None
+    ca_approved: StrictBool | None = None
+    environment: str | None = None
+    assumption_status: str | None = None
+    source_gap: StrictBool | None = None
+    ca_review_required: StrictBool | None = None
     # Interest rules use the same governed document and lifecycle as statutory
     # rules.  They are deliberately optional in a DRAFT, then required at
     # submission so a CA can prepare an incomplete draft without the system
@@ -628,6 +634,10 @@ class TdsComplianceRuleBody(BaseModel):
             raise ValueError("generalized_selection_required requires recipient_residency.")
         if self.interest_type and self.interest_type not in {"DEDUCTION_DELAY_INTEREST", "DEPOSIT_DELAY_INTEREST"}:
             raise ValueError("interest_type must be DEDUCTION_DELAY_INTEREST or DEPOSIT_DELAY_INTEREST.")
+        if self.policy_status and self.policy_status != "PROVISIONAL_UAT":
+            raise ValueError("policy_status supports only PROVISIONAL_UAT for guarded E2E records.")
+        if self.environment and self.environment != "isolated_e2e_only":
+            raise ValueError("environment supports only isolated_e2e_only for provisional records.")
         if self.policy_kind and self.policy_kind != "CONTRACTOR_DEPOSIT_DUE_DATE":
             raise ValueError("Unsupported policy_kind.")
         if self.policy_kind and self.interest_type:
@@ -1696,6 +1706,8 @@ def _interest_compliance_preview(assignment_id: str, body: InterestComplianceBod
     calculation_rows = list(db.tds_compliance_calculation_results.find({"assignment_id": assignment_id, "calculation_id": body.calculation_id}, NO_ID))
     deposit_rows = list(db.tds_compliance_deposit_results.find({"assignment_id": assignment_id, "deposit_run_id": body.deposit_run_id}, NO_ID))
     rules = list(db.tds_compliance_rules.find({"workflow": TDS_COMPLIANCE_WORKFLOW, "interest_type": {"$in": ["DEDUCTION_DELAY_INTEREST", "DEPOSIT_DELAY_INTEREST"]}, "$and": [{"$or": [{"organization_id": assignment.get("organization_id")}, {"organization_id": None}, {"scope": "GLOBAL"}]}, {"$or": [{"client_id": assignment.get("client_id")}, {"client_id": None}, {"scope": "GLOBAL"}]}]}, NO_ID))
+    if not (getattr(db, "name", None) == "26as_reconciliation_tds_e2e" and os.environ.get("TDS_PROVISIONAL_UAT_E2E") == "true"):
+        rules = [rule for rule in rules if rule.get("policy_status") != "PROVISIONAL_UAT"]
     items = calculate_interest_from_deposit_results(calculation_rows, deposit_rows, rules, assignment_id=assignment_id, calculation_id=body.calculation_id, deposit_run_id=body.deposit_run_id, ledger_version_id=calculation.get("ledger_version_id"))
     return assignment, calculation, deposit_run, items
 
@@ -1778,13 +1790,21 @@ class Phase5PolicyBody(BaseModel):
     permitted_relationship_types: list[str] = Field(min_length=1)
     allocation_policy: str
     ambiguity_policy: str
+    policy_status: str | None = None
+    ca_approved: StrictBool | None = None
+    environment: str | None = None
+    assumption_status: str | None = None
+    source_gap: StrictBool | None = None
+    ca_review_required: StrictBool | None = None
 
     @model_validator(mode="after")
     def validate_configuration(self):
-        if self.status not in {"DRAFT", "APPROVED", "ACTIVE", "RETIRED"}:
+        if self.status not in {"DRAFT", "APPROVED", "ACTIVE", "RETIRED", "PROVISIONAL_UAT"}:
             raise ValueError("Unsupported approval state.")
-        if self.active and self.status not in {"APPROVED", "ACTIVE"}:
+        if self.active and self.status not in {"APPROVED", "ACTIVE", "PROVISIONAL_UAT"}:
             raise ValueError("An active policy must be approved.")
+        if self.status == "PROVISIONAL_UAT" and not (self.policy_status == "PROVISIONAL_UAT" and self.ca_approved is False and self.environment == "isolated_e2e_only" and self.assumption_status == "PROVISIONAL" and self.source_gap is True and self.ca_review_required is True):
+            raise ValueError("Provisional policy metadata is incomplete.")
         if self.effective_from > self.effective_to:
             raise ValueError("Effective dates are reversed.")
         for fy in self.financial_years:
@@ -2295,7 +2315,11 @@ def _deposit_compliance_preview(assignment_id: str, body: DepositEvidenceBody):
     phase3 = [{**row, "actual_deduction_date": ledger_by_transaction.get(row.get("transaction_id"), {}).get("deduction_date") or row.get("contractor_due_date_context", {}).get("deduction_date"), "deductee_type": row.get("deductee_type") or ledger_by_transaction.get(row.get("transaction_id"), {}).get("deductee_type")} for row in phase3_rows]
     phase4 = list(db.tds_compliance_interest_results.find({"assignment_id": assignment_id, "interest_run_id": body.interest_run_id}, NO_ID)) if body.interest_run_id else []
     policies = list(db.tds_compliance_phase5_policies.find({"workflow": TDS_COMPLIANCE_WORKFLOW, "client_id": assignment.get("client_id"), "organization_id": assignment.get("organization_id"), "$or": [{"assignment_id": assignment_id}, {"assignment_id": None}]}, NO_ID))
+    if not (getattr(db, "name", None) == "26as_reconciliation_tds_e2e" and os.environ.get("TDS_PROVISIONAL_UAT_E2E") == "true"):
+        policies = [policy for policy in policies if policy.get("policy_status") != "PROVISIONAL_UAT"]
     due_date_policies = list(db.tds_compliance_rules.find({"workflow": TDS_COMPLIANCE_WORKFLOW, "policy_kind": "CONTRACTOR_DEPOSIT_DUE_DATE", "$and": [{"$or": [{"organization_id": assignment.get("organization_id")}, {"organization_id": None}, {"scope": "GLOBAL"}]}, {"$or": [{"client_id": assignment.get("client_id")}, {"client_id": None}, {"scope": "GLOBAL"}]}, {"$or": [{"assignment_id": assignment_id}, {"assignment_id": None}, {"scope": {"$ne": "ASSIGNMENT"}}]}]}, NO_ID))
+    if not (getattr(db, "name", None) == "26as_reconciliation_tds_e2e" and os.environ.get("TDS_PROVISIONAL_UAT_E2E") == "true"):
+        due_date_policies = [policy for policy in due_date_policies if policy.get("policy_status") != "PROVISIONAL_UAT"]
     relationships = []
     for relationship_id in body.relationship_ids:
         relationship = db.tds_compliance_deposit_relationships.find_one({"assignment_id": assignment_id, "client_id": assignment.get("client_id"), "calculation_id": body.calculation_id, "evidence_version_id": version_id, "relationship_id": relationship_id}, NO_ID)

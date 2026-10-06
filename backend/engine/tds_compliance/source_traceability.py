@@ -103,6 +103,17 @@ def governed_activation_errors(record: dict) -> list[str]:
     errors: list[str] = []
     if traceability["status"] != "VERIFIED":
         errors.append("source_verification_required")
-    if traceability["ca_approval_status"] != "CA_APPROVAL_RECORDED":
+    provisional_uat = (
+        (record.get("interest_type") in {"DEDUCTION_DELAY_INTEREST", "DEPOSIT_DELAY_INTEREST"}
+         or record.get("policy_kind") == "CONTRACTOR_DEPOSIT_DUE_DATE")
+        and record.get("policy_status") == "PROVISIONAL_UAT"
+        and record.get("environment") == "isolated_e2e_only"
+        and record.get("ca_approved") is False
+        and (record.get("approval_metadata") is None or record.get("approval_metadata") == {})
+        and record.get("assumption_status") == "PROVISIONAL"
+        and record.get("source_gap") is True
+        and record.get("ca_review_required") is True
+    )
+    if traceability["ca_approval_status"] != "CA_APPROVAL_RECORDED" and not provisional_uat:
         errors.append("approval_evidence_required")
     return errors
