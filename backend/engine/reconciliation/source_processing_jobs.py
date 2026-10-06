@@ -12,14 +12,24 @@ class SourceProcessingJobs:
     def __init__(self, collection, inspect, workers=2):
         self.collection, self.inspect = collection, inspect
         self.wake = threading.Event()
+        self.stopping = threading.Event()
         self.workers = max(1, min(int(workers), 2))
         self.worker_threads = []
 
     def start(self):
         if not self.worker_threads:
+            self.stopping.clear()
             self.worker_threads = [threading.Thread(target=self._loop, daemon=True, name=f"source-processing-{index + 1}") for index in range(self.workers)]
             for worker in self.worker_threads:
                 worker.start()
+
+    def stop(self):
+        """Stop all pollers before the application releases its Mongo client."""
+        self.stopping.set()
+        self.wake.set()
+        for worker in self.worker_threads:
+            worker.join()
+        self.worker_threads = []
 
     def enqueue(self):
         self.wake.set()
@@ -45,7 +55,8 @@ class SourceProcessingJobs:
             while not stopped.wait(30):
                 self.collection.update_one(query, {"$set": {"source_processing_lease_until": datetime.now(timezone.utc) + timedelta(minutes=5)}})
 
-        threading.Thread(target=heartbeat, daemon=True).start()
+        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread.start()
         try:
             def progress(stage, processed_rows=0, total_rows=None):
                 self.collection.update_one(query, {"$set": {"source_processing_stage": stage, "source_processing_processed_rows": processed_rows, "source_processing_total_rows": total_rows}})
@@ -58,11 +69,12 @@ class SourceProcessingJobs:
                       "source_processing_completed_at": datetime.now(timezone.utc).isoformat()}
         finally:
             stopped.set()
+            heartbeat_thread.join()
         self.collection.update_one(query, {"$set": values, "$unset": {"source_processing_lease_until": ""}})
         return True
 
     def _loop(self):
-        while True:
+        while not self.stopping.is_set():
             try:
                 if self.execute_next():
                     continue

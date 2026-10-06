@@ -13,12 +13,22 @@ class ValidationJobs:
         self.collection, self.validate = collection, validate
         collection.create_index("job_id", unique=True)
         self.wake = threading.Event()
+        self.stopping = threading.Event()
         self.worker = None
 
     def start(self):
         if self.worker is None:
+            self.stopping.clear()
             self.worker = threading.Thread(target=self._loop, daemon=True)
             self.worker.start()
+
+    def stop(self):
+        """Stop polling before the application releases its Mongo client."""
+        self.stopping.set()
+        self.wake.set()
+        if self.worker is not None:
+            self.worker.join()
+            self.worker = None
 
     def create(self, job_id, source, total_rows):
         now = datetime.now(timezone.utc)
@@ -56,7 +66,8 @@ class ValidationJobs:
                 except Exception:
                     log.exception("Validation lease renewal failed for %s", job["job_id"])
 
-        threading.Thread(target=heartbeat, daemon=True).start()
+        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread.start()
         try:
             def progress(rows):
                 self.collection.update_one(query, {"$set": {"processed_rows": rows}})
@@ -67,12 +78,13 @@ class ValidationJobs:
             values = {"status": "FAILED", "error": str(getattr(exc, "detail", None) or exc)}
         finally:
             stopped.set()
+            heartbeat_thread.join()
         values["completed_at"] = datetime.now(timezone.utc).isoformat()
         self.collection.update_one(query, {"$set": values, "$unset": {"lease_until": ""}})
         return True
 
     def _loop(self):
-        while True:
+        while not self.stopping.is_set():
             try:
                 if self.execute_next():
                     continue

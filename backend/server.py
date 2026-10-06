@@ -3550,4 +3550,8 @@ app.add_middleware(
 
 @app.on_event("shutdown")
 def shutdown_db_client():
+    # Workers own collection handles, so they must stop before PyMongo closes
+    # the process-wide client.
+    source_processing_jobs.stop()
+    books_validation_jobs.stop()
     client.close()
