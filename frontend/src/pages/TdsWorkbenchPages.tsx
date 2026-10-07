@@ -148,7 +148,23 @@ function InterestBody({ assignment }: { assignment: TdsComplianceAssignment }) {
   const interestRunId = selectedRunId || String(history.data?.[0]?.interest_run_id || "");
   const detail = useQuery({ queryKey: ["tds-interest-compliance-detail", assignment.assignment_id, interestRunId], queryFn: () => api.persistedInterestComplianceDetail(assignment.assignment_id, interestRunId), enabled: Boolean(interestRunId) });
   const policyMissing = detail.data?.items.some(item => item.overall_status === "POLICY_NOT_CONFIGURED");
+  const interestItems = detail.data?.items || [];
+  const totalInterest = interestItems.reduce((total, item) => total + Number(item.total_interest || 0), 0);
+  const dueItems = interestItems.filter(item => item.overall_status === "INTEREST_DUE");
+  const formatMoney = (value: number | null | undefined) => value == null ? "—" : `₹${new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`;
   return <>
+    <section className="tds-interest-hero">
+      <div>
+        <span className="eyebrow">PHASE 5 · CONTROLLED INTEREST REVIEW</span>
+        <h2>See what is due, why it is due, and the evidence behind it.</h2>
+        <p>Each result is calculated from the frozen TDS calculation, Phase 4 due-date snapshot and recorded deposit evidence. Results remain explicit when evidence or policy is unavailable.</p>
+      </div>
+      <div className="tds-interest-metrics" aria-label="Interest summary">
+        <div><span>Persisted runs</span><strong>{history.data?.length || 0}</strong></div>
+        <div><span>Interest due</span><strong>{formatMoney(totalInterest)}</strong></div>
+        <div><span>Items requiring interest</span><strong>{dueItems.length}</strong></div>
+      </div>
+    </section>
     <section className="workspace-section">
       <div className="section-heading"><div><span className="eyebrow">PERSISTED INTEREST EVIDENCE</span><h2>Interest and delay review</h2><p className="muted">Interest uses frozen calculation and deposit evidence. Missing approved policies remain review-required and never produce a guessed result.</p></div><TimerReset size={20} /></div>
       {calculations.data?.length ? <Table rows={calculations.data} columns={["calculation_id", "ledger_version_id", "created_at"]} /> : <InfoNotice tone="info">No frozen calculation snapshot is available yet. Complete the payment-ledger and calculation stages first.</InfoNotice>}
@@ -157,7 +173,18 @@ function InterestBody({ assignment }: { assignment: TdsComplianceAssignment }) {
       <label>Persisted interest run<select value={interestRunId} onChange={event => setSelectedRunId(event.target.value)}><option value="">No persisted interest run</option>{history.data?.map(run => <option key={String(run.interest_run_id)} value={String(run.interest_run_id)}>{String(run.interest_run_id)} · calculation {String(run.calculation_id || "Unavailable")}</option>)}</select></label>
       {history.isError || detail.isError ? <ErrorNotice message="Persisted interest evidence could not be loaded." /> : !interestRunId ? <InfoNotice tone="info">No persisted interest-compliance run is available. Run deposit compliance before reviewing interest.</InfoNotice> : <>
         <p className="muted">Run {interestRunId} · calculation {String(detail.data?.interest_run.calculation_id || "Unavailable")} · deposit {String(detail.data?.interest_run.deposit_run_id || "Unavailable")}</p>
-        <Table rows={detail.data?.items || []} columns={["transaction_id", "overall_status", "deduction_status", "deposit_status", "deposit_due_date", "total_interest"]} />
+        <div className="tds-interest-result-list">
+          {interestItems.map(item => <article className="tds-interest-result-card" key={item.transaction_id}>
+            <div className="tds-interest-result-heading"><div><span className="eyebrow">TRANSACTION</span><h3>{item.transaction_id}</h3></div><span className={`tds-status-pill ${String(item.overall_status || "").toLowerCase()}`}>{title(item.overall_status)}</span></div>
+            <div className="tds-interest-facts">
+              <div><span>Deduction status</span><b>{title(item.deduction_status)}</b></div>
+              <div><span>Deposit status</span><b>{title(item.deposit_status)}</b></div>
+              <div><span>Frozen due date</span><b>{item.deposit_due_date || "Not available"}</b></div>
+              <div><span>Interest amount</span><b className="tds-interest-money">{formatMoney(item.total_interest)}</b></div>
+            </div>
+          </article>)}
+        </div>
+        {!interestItems.length && <InfoNotice tone="info">This persisted run has no interest rows to review.</InfoNotice>}
         {policyMissing && <InfoNotice tone="warning">POLICY_NOT_CONFIGURED: no approved interest or due-date policy was supplied. No interest value was invented.</InfoNotice>}
       </>}
     </section>

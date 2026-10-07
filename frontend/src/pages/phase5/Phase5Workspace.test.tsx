@@ -49,7 +49,7 @@ test('missing policy shows Configuration Required and disables final run', async
 });
 test('ambiguous policy preview displays review without silently selecting a policy', async () => {
   mockApi.preview.mockResolvedValue({ items: [{ ...result, phase5_rule_snapshot: null, reason_code: 'PHASE5_POLICY_AMBIGUOUS', overall_status: 'REVIEW_REQUIRED' }], summary: { ...summary, review_required_count: 1 } });
-  await render(); await click('Preview Compliance'); expect(host.textContent).toContain('Multiple applicable policies — manual review required'); expect(host.textContent).toContain('Review Required');
+  await render(); await click('Preview Compliance'); expect(host.textContent).toContain('More than one policy is applicable. Resolve the policy selection before creating a saved run.'); expect(host.textContent).toContain('Review Required');
   expect(Array.from(host.querySelectorAll('button')).find(b => b.textContent === 'Run Compliance')?.disabled).toBe(true);
 });
 test('evidence table preserves missing source fields as Not Provided', async () => {
