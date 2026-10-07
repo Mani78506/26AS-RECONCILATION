@@ -2916,7 +2916,15 @@ def sales_tds_results(run_id: str, page: int = 1, page_size: int = Query(50, le=
         query["overall_status"] = status
     total = db.results.count_documents(query)
     rows = list(db.results.find(query, NO_ID).sort("seq", ASCENDING).skip((page - 1) * page_size).limit(page_size))
-    return {"items": [_with_transaction_reconciliation(row) for row in rows], "total": total, "page": page, "page_size": page_size, "run_id": run_id}
+    commentaries = {item["relationship_id"]: item for item in db.reconciliation_relationship_commentaries.find({"run_id": run_id, "relationship_id": {"$in": [row["id"] for row in rows]}, "is_current": True}, {"_id": 0, "relationship_id": 1, "review_status": 1, "updated_at": 1, "updated_by": 1, "version": 1})}
+    items = []
+    for row in rows:
+        projected = _with_transaction_reconciliation(row)
+        commentary = commentaries.get(row["id"])
+        projected["relationship_id"] = row["id"]
+        projected["commentary_summary"] = ({"exists": True, **commentary} if commentary else {"exists": False})
+        items.append(projected)
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "run_id": run_id}
 
 
 @app.get("/api/sales-tds-26as/results/{result_id}")
@@ -2924,7 +2932,10 @@ def sales_tds_result(result_id: str, run_id: str):
     row = db.results.find_one({"id": result_id, "run_id": run_id, "workflow": "SALES_TDS_26AS"}, NO_ID)
     if not row:
         raise HTTPException(404, "Sales + TDS + 26AS result not found.")
-    return _with_transaction_reconciliation(row)
+    projected = _with_transaction_reconciliation(row)
+    projected["relationship_id"] = row["id"]
+    projected["commentary"] = _current_commentary(run_id, row["id"])
+    return projected
 
 
 @app.get("/api/sales-tds-26as/exceptions")
@@ -3125,6 +3136,8 @@ def _query(run_id: str, params: dict, search: str | None):
 
 def _relationship_id(row: dict) -> str:
     """Return the stable review unit without changing any engine result fields."""
+    if row.get("workflow") == "SALES_TDS_26AS":
+        return str(row["id"])
     return str(row.get("match_group_id") or row.get("relationship_id") or row["id"])
 
 
@@ -3133,8 +3146,8 @@ def _relationship_row(run_id: str, relationship_id: str) -> tuple[dict, str]:
     run = db.runs.find_one({"run_id": run_id}, NO_ID)
     if not run:
         raise HTTPException(404, "Reconciliation run not found")
-    if run.get("workflow") in {"26AS_ONLY", "SALES_TDS_26AS"}:
-        raise HTTPException(400, "CA commentary is available only for full reconciliation relationships.")
+    if run.get("workflow") == "26AS_ONLY":
+        raise HTTPException(400, "CA commentary is not available for 26AS-only analysis entries.")
     row = db.results.find_one({"run_id": run_id, "$or": [{"id": relationship_id}, {"match_group_id": relationship_id}, {"relationship_id": relationship_id}]}, NO_ID)
     if not row:
         raise HTTPException(404, "Relationship not found in this reconciliation run")
