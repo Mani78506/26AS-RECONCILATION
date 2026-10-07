@@ -55,6 +55,10 @@ client = MongoClient(mongo_url)
 db = client[database_name]
 for coll, keys in (("results", [("run_id", ASCENDING), ("seq", ASCENDING)]), ("uploads", [("upload_id", ASCENDING)]), ("runs", [("run_id", ASCENDING)]), ("identity_mappings", [("assessee_pan", ASCENDING), ("tan", ASCENDING)]), ("ai_contexts", [("run_id", ASCENDING), ("version", ASCENDING)]), ("ai_conversations", [("conversation_id", ASCENDING), ("run_id", ASCENDING)])):
     db[coll].create_index(keys)
+db.reconciliation_relationship_commentaries.create_index([("commentary_id", ASCENDING)], unique=True)
+db.reconciliation_relationship_commentaries.create_index([("run_id", ASCENDING), ("relationship_id", ASCENDING), ("version", ASCENDING)], unique=True)
+db.reconciliation_relationship_commentaries.create_index([("run_id", ASCENDING), ("relationship_id", ASCENDING), ("is_current", ASCENDING)])
+db.reconciliation_relationship_commentary_events.create_index([("run_id", ASCENDING), ("relationship_id", ASCENDING), ("created_at", ASCENDING)])
 db.tds_rules.create_index([("rule_id", ASCENDING)], unique=True)
 db.tds_compliance_assignments.create_index([("assignment_id", ASCENDING)], unique=True)
 db.tds_compliance_assignments.create_index([("organization_id", ASCENDING), ("client_id", ASCENDING), ("financial_year", ASCENDING)])
@@ -3119,6 +3123,97 @@ def _query(run_id: str, params: dict, search: str | None):
     return q
 
 
+def _relationship_id(row: dict) -> str:
+    """Return the stable review unit without changing any engine result fields."""
+    return str(row.get("match_group_id") or row.get("relationship_id") or row["id"])
+
+
+def _relationship_row(run_id: str, relationship_id: str) -> tuple[dict, str]:
+    """Validate that a commentary target belongs to this completed full-reconciliation run."""
+    run = db.runs.find_one({"run_id": run_id}, NO_ID)
+    if not run:
+        raise HTTPException(404, "Reconciliation run not found")
+    if run.get("workflow") in {"26AS_ONLY", "SALES_TDS_26AS"}:
+        raise HTTPException(400, "CA commentary is available only for full reconciliation relationships.")
+    row = db.results.find_one({"run_id": run_id, "$or": [{"id": relationship_id}, {"match_group_id": relationship_id}, {"relationship_id": relationship_id}]}, NO_ID)
+    if not row:
+        raise HTTPException(404, "Relationship not found in this reconciliation run")
+    return row, _relationship_id(row)
+
+
+def _current_commentary(run_id: str, relationship_id: str) -> dict | None:
+    return strip(db.reconciliation_relationship_commentaries.find_one(
+        {"run_id": run_id, "relationship_id": relationship_id, "is_current": True}, NO_ID
+    ))
+
+
+class RelationshipCommentaryInput(BaseModel):
+    commentary: str = Field(min_length=1, max_length=2000)
+    review_status: str = "NEW"
+    reviewer: str = Field(min_length=1, max_length=120)
+
+
+def _validate_commentary_input(body: RelationshipCommentaryInput) -> tuple[str, str, str]:
+    commentary = body.commentary.strip()
+    reviewer = body.reviewer.strip()
+    if not commentary:
+        raise HTTPException(422, "Commentary cannot be empty.")
+    if not reviewer:
+        raise HTTPException(422, "Reviewer identity is required.")
+    if body.review_status not in {"NEW", "REVIEWED"}:
+        raise HTTPException(422, "Review status must be NEW or REVIEWED.")
+    return commentary, reviewer, body.review_status
+
+
+@app.get("/api/reconciliation/runs/{run_id}/relationships/{relationship_id}/commentary")
+def relationship_commentary(run_id: str, relationship_id: str):
+    _, canonical_id = _relationship_row(run_id, relationship_id)
+    return {"run_id": run_id, "relationship_id": canonical_id, "commentary": _current_commentary(run_id, canonical_id)}
+
+
+@app.get("/api/reconciliation/runs/{run_id}/relationships/{relationship_id}/commentary/history")
+def relationship_commentary_history(run_id: str, relationship_id: str):
+    _, canonical_id = _relationship_row(run_id, relationship_id)
+    items = list(db.reconciliation_relationship_commentaries.find(
+        {"run_id": run_id, "relationship_id": canonical_id}, NO_ID
+    ).sort("version", DESCENDING))
+    return {"run_id": run_id, "relationship_id": canonical_id, "items": items}
+
+
+@app.post("/api/reconciliation/runs/{run_id}/relationships/{relationship_id}/commentary")
+def create_relationship_commentary(run_id: str, relationship_id: str, body: RelationshipCommentaryInput):
+    row, canonical_id = _relationship_row(run_id, relationship_id)
+    commentary, reviewer, review_status = _validate_commentary_input(body)
+    if _current_commentary(run_id, canonical_id):
+        raise HTTPException(409, "Commentary already exists for this relationship. Update it to create a new revision.")
+    ts = now_iso()
+    item = {"commentary_id": uuid.uuid4().hex, "run_id": run_id, "relationship_id": canonical_id,
+            "match_group_id": row.get("match_group_id"), "result_id": row["id"], "commentary": commentary,
+            "review_status": review_status, "created_by": reviewer, "created_at": ts, "updated_by": reviewer,
+            "updated_at": ts, "version": 1, "is_current": True}
+    db.reconciliation_relationship_commentaries.insert_one(item)
+    db.reconciliation_relationship_commentary_events.insert_one({"event_id": uuid.uuid4().hex, "event": "CREATED", "run_id": run_id, "relationship_id": canonical_id, "commentary_id": item["commentary_id"], "actor": reviewer, "created_at": ts})
+    return strip(item)
+
+
+@app.put("/api/reconciliation/runs/{run_id}/relationships/{relationship_id}/commentary")
+def update_relationship_commentary(run_id: str, relationship_id: str, body: RelationshipCommentaryInput):
+    row, canonical_id = _relationship_row(run_id, relationship_id)
+    commentary, reviewer, review_status = _validate_commentary_input(body)
+    current = _current_commentary(run_id, canonical_id)
+    if not current:
+        raise HTTPException(404, "No commentary exists for this relationship. Create it first.")
+    ts = now_iso()
+    db.reconciliation_relationship_commentaries.update_one({"commentary_id": current["commentary_id"]}, {"$set": {"is_current": False}})
+    item = {"commentary_id": uuid.uuid4().hex, "run_id": run_id, "relationship_id": canonical_id,
+            "match_group_id": row.get("match_group_id"), "result_id": row["id"], "commentary": commentary,
+            "review_status": review_status, "created_by": current["created_by"], "created_at": current["created_at"],
+            "updated_by": reviewer, "updated_at": ts, "version": current["version"] + 1, "is_current": True}
+    db.reconciliation_relationship_commentaries.insert_one(item)
+    db.reconciliation_relationship_commentary_events.insert_one({"event_id": uuid.uuid4().hex, "event": "UPDATED", "run_id": run_id, "relationship_id": canonical_id, "commentary_id": item["commentary_id"], "previous_commentary_id": current["commentary_id"], "actor": reviewer, "created_at": ts})
+    return strip(item)
+
+
 @app.get("/api/reconciliation/results")
 def results(run_id: str | None = None, page: int = 1, page_size: int = Query(50, le=500), search: str | None = None, sort: str = "seq", order: str = "asc",
             financial_year: str | None = None, quarter: str | None = None, customer: str | None = None, customer_code: str | None = None, deductor: str | None = None, tan: str | None = None, section: str | None = None,
@@ -3140,7 +3235,19 @@ def results(run_id: str | None = None, page: int = 1, page_size: int = Query(50,
         customers[r["customer_code"]] = r["customer"]
     facets["customers"] = [{"code": k, "name": v} for k, v in sorted(customers.items())]
     facets["deductors"] = sorted(v for v in db.results.distinct("deductor_name", {"run_id": rid}) if v)
-    return {"items": list(cursor), "total": total, "page": page, "page_size": page_size, "run_id": rid, "facets": facets}
+    items = list(cursor)
+    relationship_ids = {_relationship_id(row) for row in items}
+    commentaries = {
+        item["relationship_id"]: item
+        for item in db.reconciliation_relationship_commentaries.find(
+            {"run_id": rid, "relationship_id": {"$in": list(relationship_ids)}, "is_current": True},
+            {"_id": 0, "relationship_id": 1, "commentary": 1, "review_status": 1, "updated_at": 1, "updated_by": 1, "version": 1},
+        )
+    }
+    for item in items:
+        commentary = commentaries.get(_relationship_id(item))
+        item["commentary_summary"] = ({"exists": True, **commentary} if commentary else {"exists": False})
+    return {"items": items, "total": total, "page": page, "page_size": page_size, "run_id": rid, "facets": facets}
 
 
 @app.get("/api/reconciliation/results/{result_id}")
@@ -3154,6 +3261,8 @@ def result_detail(result_id: str, run_id: str | None = None):
     if not row:
         raise HTTPException(404, "Result not found")
     row["exception_state"] = strip(db.exception_states.find_one({"result_id": result_id})) or {"status": "OPEN", "notes": []}
+    row["relationship_id"] = _relationship_id(row)
+    row["commentary"] = _current_commentary(row["run_id"], row["relationship_id"])
     if row.get("match_group_id"):
         row["group_rows"] = list(db.results.find({"run_id": row["run_id"], "match_group_id": row["match_group_id"]}, {"_id": 0, "id": 1, "transaction_id": 1, "tds_expected": 1, "books_date": 1, "books_quarter": 1, "section": 1}))
     return row
@@ -3416,6 +3525,16 @@ def export(report: str = "ca_reconciliation", format: str = "xlsx", run_id: str 
     if run.get("workflow") == "SALES_TDS_26AS" and report not in {"ca_reconciliation", "exceptions", "control_totals"}:
         raise HTTPException(400, "This report is not available for the Sales + TDS + 26AS workflow.")
     rows = list(db.results.find({"run_id": rid}, NO_ID).sort("seq", ASCENDING))
+    if report == "ca_reconciliation" and run.get("workflow") != "SALES_TDS_26AS":
+        commentaries = {
+            item["relationship_id"]: item
+            for item in db.reconciliation_relationship_commentaries.find({"run_id": rid, "is_current": True}, NO_ID)
+        }
+        for row in rows:
+            commentary = commentaries.get(_relationship_id(row))
+            row["ca_commentary"] = commentary.get("commentary") if commentary else None
+            row["ca_commentary_status"] = commentary.get("review_status") if commentary else None
+            row["ca_commentary_updated_by"] = commentary.get("updated_by") if commentary else None
     states = {s["result_id"]: strip(s) for s in db.exception_states.find({"run_id": rid})}
     title, meta_rows, cols, data = build_report(report, run, rows, states)
     content = render(format, title, meta_rows, cols, data)

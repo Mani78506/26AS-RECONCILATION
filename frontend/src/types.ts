@@ -24,7 +24,17 @@ export interface ReconciliationResult {
   books?: BooksFields | null; statement_entries?: StatementEntry[];
   exception_state?: ExceptionState; group_rows?: { id: string; transaction_id: string; tds_expected: number | null; books_date: string | null; books_quarter: string | null; section: string }[];
   exception_status?: ExceptionStatus; notes?: ExceptionNote[]; assignee?: string | null;
+  relationship_id?: string;
+  commentary?: RelationshipCommentary | null;
+  commentary_summary?: RelationshipCommentarySummary;
 }
+
+export interface RelationshipCommentary {
+  commentary_id: string; run_id: string; relationship_id: string; match_group_id?: string | null; result_id: string;
+  commentary: string; review_status: "NEW" | "REVIEWED"; created_by: string; created_at: string; updated_by: string; updated_at: string;
+  version: number; is_current: boolean;
+}
+export interface RelationshipCommentarySummary { exists: boolean; relationship_id?: string; commentary?: string; review_status?: "NEW" | "REVIEWED"; updated_at?: string; updated_by?: string; version?: number; }
 
 export interface ExceptionNote { text: string; by: string; at: string; }
 export interface ExceptionState { result_id?: string; status: ExceptionStatus; notes: ExceptionNote[]; assignee?: string | null; history?: { from: string; to: string; by: string; at: string }[]; updated_at?: string; }

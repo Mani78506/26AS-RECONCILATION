@@ -89,7 +89,7 @@ export default function ReconciliationPage() {
         </>}
     </section>
 
-    <Drawer open={!!id} onClose={() => navigate(`/reconciliation?${sp.toString()}`)} title={<span className="drawer-title"><button className="back-link inline" data-testid="back-to-reconciliation-button" onClick={() => navigate(`/reconciliation?${sp.toString()}`)}><ArrowLeft size={14} /></button> {analysisOnly ? "26AS entry analysis" : "Transaction detail"}</span>} subtitle={analysisOnly ? "26AS deduction, configured-rule calculation and analysis rationale." : "Engine-provided match explanation, claimability and recommended action."} testId="result-drawer">{id && <ResultDetail id={decodeURIComponent(id)} />}</Drawer>
+    <Drawer open={!!id} onClose={() => navigate(`/reconciliation?${sp.toString()}`)} title={<span className="drawer-title"><button className="back-link inline" data-testid="back-to-reconciliation-button" onClick={() => navigate(`/reconciliation?${sp.toString()}`)}><ArrowLeft size={14} /></button> {analysisOnly ? "26AS entry analysis" : "Reconciliation review detail"}</span>} subtitle={analysisOnly ? "26AS deduction, configured-rule calculation and analysis rationale." : "Review the complete system finding, source evidence, recommended CA action and working-paper commentary."} testId="result-drawer">{id && <ResultDetail id={decodeURIComponent(id)} />}</Drawer>
   </>;
 }
 
@@ -109,7 +109,7 @@ function FullResultCard({ row, onOpen }: { row: ReconciliationResult; onOpen: ()
         <h3 className="mono">{row.transaction_id || "Source record"}</h3>
         <p>{status.label}{isGroup ? ` · ${row.group_size} source records in this group` : ""}</p>
       </div>
-      <button className="text-button full-card-open" onClick={(event) => { event.stopPropagation(); onOpen(); }}>View details</button>
+      <button type="button" className="text-button full-card-open" onClick={(event) => { event.stopPropagation(); onOpen(); }}>Open full review</button>
     </header>
     <div className="full-party-grid">
       <section><span>BOOKS CUSTOMER</span><b>{row.customer || "—"}</b><small>{row.customer_code ? `Code: ${row.customer_code}` : "No Books customer linked"}</small></section>
@@ -120,7 +120,7 @@ function FullResultCard({ row, onOpen }: { row: ReconciliationResult; onOpen: ()
       <div className="full-check-heading"><b>TDS reconciliation</b><span>Books TDS Expected vs 26AS TDS Deducted</span></div>
       <div className="full-check-values"><div><span>Books TDS Expected</span><b><Amount value={row.tds_expected} /></b></div><div><span>26AS TDS Deducted</span><b><Amount value={row.tax_deducted} /></b></div><div><span>Difference</span><b><Amount value={row.difference} signed /></b></div></div>
     </section>
-    <footer><p title={row.reason}><b>Reason:</b> {row.reason || status.explanation}</p><p title={row.recommended_action}><b>Recommended action:</b> {row.recommended_action || "Open details to review source evidence."}</p></footer>
+    <footer><section className="card-review-copy"><span>SYSTEM FINDING</span><p>{row.reason || status.explanation}</p></section><section className="card-review-copy action"><span>RECOMMENDED CA ACTION</span><p>{row.recommended_action || "Open the full review to examine the source evidence."}</p></section><div className={`commentary-indicator ${row.commentary_summary?.exists ? "added" : ""}`} data-testid={`commentary-indicator-${row.transaction_id}`}>{row.commentary_summary?.exists ? <><b>CA commentary added</b><span>{row.commentary_summary.review_status === "REVIEWED" ? "Reviewed" : "New"} · Open full review to view</span></> : <><b>CA commentary not added</b><span>Open full review to record the CA conclusion</span></>}</div></footer>
   </article>;
 }
 
